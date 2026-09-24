@@ -61,6 +61,7 @@
 // Skeleton: every body is `todo!()`. Remove once the implementation lands.
 #![allow(unused_variables, dead_code)]
 
+mod capture;
 mod device;
 mod error;
 mod sink;
