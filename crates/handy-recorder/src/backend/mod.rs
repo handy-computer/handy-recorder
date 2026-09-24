@@ -127,7 +127,11 @@ pub(crate) enum BackendErrorKind {
     UnsupportedConfig,
     /// The stream can no longer run as built.
     StreamInvalidated,
-    /// The stream was rerouted to a new default device and keeps running.
+    /// The stream was rerouted to a new default device. The stream keeps
+    /// running, but the library treats this as the end of the recorder: the
+    /// device it reported opening is no longer the one recording, and the
+    /// new one may run at a different format.
+    // TODO(review): see TODO.md, "Default device changing mid-recording".
     DeviceChanged,
     /// A buffer overrun or underrun; the stream keeps running.
     Xrun,
@@ -138,13 +142,10 @@ pub(crate) enum BackendErrorKind {
 }
 
 impl BackendErrorKind {
-    /// Whether the platform documents the stream as still running after
-    /// reporting this error.
+    /// Whether the recorder carries on after this error: the platform
+    /// documents the stream as still running and nothing about it changed.
     pub fn stream_survives(self) -> bool {
-        matches!(
-            self,
-            Self::DeviceChanged | Self::Xrun | Self::RealtimeDenied
-        )
+        matches!(self, Self::Xrun | Self::RealtimeDenied)
     }
 }
 

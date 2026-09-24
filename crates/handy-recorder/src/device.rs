@@ -23,6 +23,11 @@ pub struct InputDevice {
     /// False where the backend has no stable IDs and `id` is built from the
     /// name and occurrence, which is best effort.
     pub id_is_stable: bool,
+    /// Channels the device captures at the format the OS has it set to, for
+    /// a channel picker (`Channels::Only`). `None` where reading it would
+    /// open the device (ALSA) or the platform did not say.
+    // TODO(review): see TODO.md, "InputDevice::channels".
+    pub channels: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

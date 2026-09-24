@@ -74,9 +74,27 @@ fn id_is_stable(host: cpal::HostId) -> bool {
     true
 }
 
+/// Reads a device's channel count without opening it: the channel count of
+/// the format it would be opened at (Handy's `preferred_input_channel_count`).
+/// `None` on ALSA, where reading a device's configs opens its PCM, which
+/// cpal avoids during enumeration because failed opens can leak descriptors.
+fn channels_without_opening(host: cpal::HostId, device: &cpal::Device) -> Option<u16> {
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+    if host == cpal::HostId::Alsa {
+        return None;
+    }
+    let _ = host;
+    get_preferred_config(device).ok().map(|c| c.channels())
+}
+
 /// Enumerates input devices with their identity. A device whose backend has
 /// no ID gets one built from its name and occurrence ("USB Mic#1").
-fn enumerate(host: &cpal::Host) -> Result<Vec<(InputDevice, cpal::Device)>, BackendError> {
+/// `with_channels` also reads each device's channel count, which costs a
+/// config query per device on CoreAudio and WASAPI.
+fn enumerate(
+    host: &cpal::Host,
+    with_channels: bool,
+) -> Result<Vec<(InputDevice, cpal::Device)>, BackendError> {
     let default_id = host.default_input_device().and_then(|d| d.id().ok());
     let backend = host.id().name().to_owned();
     let mut occurrences = HashMap::<String, u32>::new();
@@ -100,6 +118,11 @@ fn enumerate(host: &cpal::Host) -> Result<Vec<(InputDevice, cpal::Device)>, Back
                 backend: backend.clone(),
                 is_default,
                 id_is_stable: stable,
+                channels: if with_channels {
+                    channels_without_opening(host.id(), &device)
+                } else {
+                    None
+                },
             },
             device,
         ));
@@ -110,16 +133,17 @@ fn enumerate(host: &cpal::Host) -> Result<Vec<(InputDevice, cpal::Device)>, Back
 
 impl Backend for CpalBackend {
     fn list_input_devices(&self) -> Result<Vec<InputDevice>, BackendError> {
-        Ok(enumerate(&self.host)?
+        Ok(enumerate(&self.host, true)?
             .into_iter()
             .map(|(info, _)| info)
             .collect())
     }
 
     fn open_device(&self, id: Option<&str>) -> Result<Box<dyn OpenDevice>, BackendError> {
+        // TODO(review): see TODO.md, "Device enumeration on every open".
         let host = &self.host;
-        let (info, device) = match id {
-            Some(id) => enumerate(host)?
+        let (mut info, device) = match id {
+            Some(id) => enumerate(host, false)?
                 .into_iter()
                 .find(|(info, _)| info.id == id)
                 .ok_or_else(|| {
@@ -136,7 +160,7 @@ impl Backend for CpalBackend {
                     )
                 })?;
                 let id = device.id().ok();
-                let info = enumerate(host)
+                let info = enumerate(host, false)
                     .ok()
                     .and_then(|devices| {
                         devices
@@ -151,6 +175,7 @@ impl Backend for CpalBackend {
                         backend: host.id().name().to_owned(),
                         is_default: true,
                         id_is_stable: id.is_some_and(|id| id_is_stable(id.host())),
+                        channels: None,
                     });
                 (info, device)
             }
@@ -192,6 +217,9 @@ impl Backend for CpalBackend {
                 ));
             }
         };
+
+        // The opened device's channel count is the format it runs at.
+        info.channels = Some(config.channels());
 
         Ok(Box::new(CpalOpenDevice {
             info,
@@ -320,7 +348,6 @@ fn map_error(e: cpal::Error) -> BackendError {
         // May be reported repeatedly on the audio thread (xruns under load),
         // so it carries a fixed description instead of an allocated message.
         let message = match kind {
-            BackendErrorKind::DeviceChanged => "The stream was rerouted to a new default device",
             BackendErrorKind::Xrun => "A buffer overrun or underrun occurred",
             _ => "Real-time scheduling was refused for the audio thread",
         };
@@ -405,10 +432,6 @@ mod tests {
     #[test]
     fn errors_the_stream_survives_are_classified_without_allocating() {
         for (cpal_kind, kind) in [
-            (
-                cpal::ErrorKind::DeviceChanged,
-                BackendErrorKind::DeviceChanged,
-            ),
             (cpal::ErrorKind::Xrun, BackendErrorKind::Xrun),
             (
                 cpal::ErrorKind::RealtimeDenied,
@@ -432,6 +455,10 @@ mod tests {
             (
                 cpal::ErrorKind::StreamInvalidated,
                 BackendErrorKind::StreamInvalidated,
+            ),
+            (
+                cpal::ErrorKind::DeviceChanged,
+                BackendErrorKind::DeviceChanged,
             ),
             (
                 cpal::ErrorKind::PermissionDenied,

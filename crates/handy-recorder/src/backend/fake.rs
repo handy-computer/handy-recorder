@@ -42,6 +42,7 @@ impl FakeBackend {
                     backend: "Fake".into(),
                     is_default: true,
                     id_is_stable: true,
+                    channels: Some(format.channels),
                 },
                 format,
                 state: Mutex::default(),
