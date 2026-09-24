@@ -29,7 +29,6 @@ pub struct InputDevice {
     /// Channels the device captures at the format the OS has it set to, for
     /// a channel picker (`Channels::Only`). `None` where reading it would
     /// open the device (ALSA) or the platform did not say.
-    // TODO(review): see TODO.md, "InputDevice::channels".
     pub channels: Option<u16>,
 }
 

@@ -87,7 +87,9 @@ use capture::engine::{Engine, Timeouts};
 /// `Sync`, lifetime-free: store it in a struct, or share it with an `Arc`.
 ///
 /// Every recording on a recorder uses the same sink type. An application
-/// that needs several kinds uses an enum or `Box<dyn Sink>`.
+/// that needs several kinds uses an enum, which `stop` hands back to match
+/// on, or `Box<dyn Sink>` when its sinks forward audio elsewhere and nothing
+/// needs to be read back out of them.
 ///
 /// Dropping it is `close`.
 pub struct Recorder<S> {

@@ -5,7 +5,8 @@ use crate::{Error, InputDevice};
 ///
 /// The device always runs at the format the OS has it set to. These fields
 /// describe what the sink receives; the library converts (channel routing,
-/// resampling, chunking) and never changes anything about the device.
+/// resampling, chunking) and never changes anything about the device, except
+/// where `take_headset` asks it to.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RecorderConfig {
     /// An `InputDevice::id` from `list_input_devices`. `None` opens the
@@ -21,6 +22,11 @@ pub struct RecorderConfig {
     /// delivers about 10 ms per call. Set it only if the sink needs a fixed
     /// size, such as a VAD model that takes exactly 512 samples.
     pub frames_per_chunk: Option<usize>,
+    /// macOS only: while recording from a Bluetooth headset, open a silent output
+    /// stream running on the headset. For AirPods this will pull them over
+    /// to get the audio stream. Before the device is active there will
+    /// be digital silence.
+    pub take_headset: bool,
 }
 
 impl RecorderConfig {
@@ -32,6 +38,7 @@ impl RecorderConfig {
             sample_rate: Some(16_000),
             channels: Channels::MixToMono,
             frames_per_chunk: Some(480),
+            take_headset: false,
         }
     }
 }

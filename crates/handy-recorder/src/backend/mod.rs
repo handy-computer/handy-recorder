@@ -9,6 +9,8 @@
 pub(crate) mod cpal;
 #[cfg(test)]
 pub(crate) mod fake;
+#[cfg(target_os = "macos")]
+mod headset_macos;
 
 use std::{borrow::Cow, fmt};
 
@@ -48,7 +50,12 @@ pub(crate) trait OpenDevice {
 
 /// A running input stream. Dropping it stops the stream and releases the
 /// device. Not `Send`: it is created, owned, and dropped on one thread.
-pub(crate) trait InputStream {}
+pub(crate) trait InputStream {
+    /// Starts or stops holding the device's headset (`take_headset`). Best
+    /// effort: a backend logs what it could not do. A no-op where it does not
+    /// apply.
+    fn hold_headset(&mut self, _hold: bool) {}
+}
 
 /// Receives each block of interleaved device samples. Called on the
 /// real-time thread: must not allocate, lock, log, or block.

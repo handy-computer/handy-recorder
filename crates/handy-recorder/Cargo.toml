@@ -23,6 +23,10 @@ cpal = "0.18.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 cpal = { version = "0.18.2", features = ["pulseaudio"] }
 
-# Microphone permission status (AVCaptureDevice authorization).
+# Microphone permission status (AVCaptureDevice authorization), and finding a
+# Bluetooth headset's output device for `take_headset` (the CoreAudio and
+# CoreFoundation bindings cpal already uses).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat"] }
+objc2-core-audio = { version = "0.3.2", default-features = false, features = ["std", "AudioHardware"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFString"] }

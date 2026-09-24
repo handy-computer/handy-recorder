@@ -3,7 +3,7 @@
 //! operator to act ("disconnect now"), and prints PASS, FAIL, or INFO with
 //! what it measured.
 //!
-//! Usage: handy-recorder-probe <probe> [--device <id>] [--secs <n>] [--recording]
+//! Usage: handy-recorder-probe <probe> [--device <id>] [--secs <n>] [--recording] [--take-headset]
 //! Run with no arguments for the list of probes. See README.md for what to
 //! run on each platform. Every run writes `results/<time>-<os>-<probe>.txt`
 //! with the machine description, all output, and the library's debug log.
@@ -15,7 +15,10 @@ use std::{
     env,
     io::{self, BufRead, Write},
     process::ExitCode,
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -60,6 +63,11 @@ const PROBES: &[(&str, &str, bool)] = &[
     (
         "external-app",
         "record alongside another app (meeting app, Voice Memos), both orders",
+        true,
+    ),
+    (
+        "meeting-app",
+        "a warm recorder across a real call (Meet, Zoom): joining, during, leaving, after",
         true,
     ),
     (
@@ -197,7 +205,7 @@ fn main() -> ExitCode {
 
 fn usage() {
     eprintln!(
-        "usage: handy-recorder-probe <probe|auto|all> [--device <id>] [--secs <n>] [--recording]\n"
+        "usage: handy-recorder-probe <probe|auto|all> [--device <id>] [--secs <n>] [--recording] [--take-headset]\n"
     );
     for (name, description, interactive) in PROBES {
         eprintln!(
@@ -231,6 +239,7 @@ impl Opts {
                 "--device" => opts.device = it.next().cloned(),
                 "--secs" => opts.secs = it.next().and_then(|s| s.parse().ok()),
                 "--recording" => opts.recording = true,
+                "--take-headset" => TAKE_HEADSET.store(true, Ordering::Relaxed),
                 "--no-results" => opts.no_results = true,
                 other => eprintln!("ignoring unknown argument {other:?}"),
             }
@@ -264,6 +273,7 @@ fn run(name: &str, opts: &Opts) -> Outcome {
         "slow-sink" => probe_slow_sink(opts),
         "second-process" => probe_second_process(opts),
         "external-app" => probe_external_app(opts),
+        "meeting-app" => probe_meeting_app(opts),
         "hold" => probe_hold(opts),
         "slow-start" => probe_slow_start(opts),
         "disconnect-recording" => probe_disconnect_recording(opts),
@@ -339,6 +349,17 @@ impl ProbeSink {
             * 0.1
     }
 
+    /// The longest run of exact digital silence anywhere, in seconds.
+    fn longest_zero_seconds(&self) -> f64 {
+        let mut longest = 0;
+        let mut run = 0;
+        for &p in &self.timeline {
+            run = if p == 0.0 { run + 1 } else { 0 };
+            longest = longest.max(run);
+        }
+        longest as f64 * 0.1
+    }
+
     fn describe(&self) -> String {
         format!(
             "{:.2} s of audio, {:.1} dBFS, peak {:.4}, first chunk after {:?}",
@@ -382,12 +403,17 @@ struct Opened {
     opened_at: Instant,
 }
 
+/// `--take-headset`: every recorder this process opens sets
+/// `RecorderConfig::take_headset`.
+static TAKE_HEADSET: AtomicBool = AtomicBool::new(false);
+
 fn open(device: Option<&str>) -> Result<Opened, Error> {
     let (tx, failures) = mpsc::channel();
     let started = Instant::now();
     let recorder = Recorder::open_with_failure_handler(
         RecorderConfig {
             device: device.map(str::to_owned),
+            take_headset: TAKE_HEADSET.load(Ordering::Relaxed),
             ..RecorderConfig::speech()
         },
         move |error| {
@@ -599,6 +625,12 @@ fn probe_baseline(opts: &Opts) -> Result<Outcome, Error> {
     if sink.seconds() < secs * 0.9 {
         return Ok(Outcome::Fail(format!(
             "too little audio for {secs} s; {detail}"
+        )));
+    }
+    let gap = sink.longest_zero_seconds();
+    if gap >= 0.5 {
+        return Ok(Outcome::Fail(format!(
+            "{gap:.1} s of exact digital silence inside the recording; {detail}"
         )));
     }
     opened.recorder.close()?;
@@ -930,7 +962,7 @@ fn probe_sleep_wake(opts: &Opts) -> Result<Outcome, Error> {
             ) =>
         {
             Ok(Outcome::Fail(format!(
-                "watchdog false positive across sleep: {e} (see TODO.md, \"Watchdog false positives\")"
+                "watchdog false positive across sleep: {e}"
             )))
         }
         Some((_, e)) => Ok(Outcome::Info(format!(
@@ -1142,6 +1174,209 @@ fn probe_external_app(opts: &Opts) -> Result<Outcome, Error> {
     } else {
         Outcome::Fail(summary)
     })
+}
+
+/// A warm recorder (Handy's always-on mode) held across a real call, plus
+/// a new process and new recorders during the call and after it. By default the call starts while the
+/// warm recorder is idle and ends while it records; `--recording` swaps
+/// the two.
+fn probe_meeting_app(opts: &Opts) -> Result<Outcome, Error> {
+    let device = choose_device(opts, "choose the microphone the call will use")?;
+    let mut warm = Some(open(device.as_deref())?);
+    let name = warm.as_ref().unwrap().recorder.info().device.name.clone();
+    prompt(&format!(
+        "Get a call ready in Google Meet (or Zoom, Teams, FaceTime) using {name}, but do not start it \
+         and do not open its preview screen yet (the preview already uses the microphone). In Meet, \
+         \"New meeting > Start an instant meeting\" skips the preview; check its microphone afterwards. \
+         Keep talking during every recording from here on."
+    ));
+    let mut steps = Vec::new();
+    let mut ok = true;
+    // Records on the warm recorder, reopening it first if it failed earlier.
+    let mut warm_step = |label: &str,
+                         secs: f64,
+                         during: Option<&str>,
+                         steps: &mut Vec<String>,
+                         ok: &mut bool|
+     -> Result<(), Error> {
+        if warm.is_none() {
+            say!("  reopening the warm recorder after its failure");
+            warm = Some(open(device.as_deref())?);
+        }
+        let opened = warm.as_ref().unwrap();
+        let stopped = match opened.recorder.start(ProbeSink::new()) {
+            Err(e) => Err(e.error),
+            Ok(()) => {
+                if let Some(action) = during {
+                    prompt(action);
+                }
+                thread::sleep(Duration::from_secs_f64(secs));
+                opened.recorder.stop()
+            }
+        };
+        let failure = opened.failures.try_recv().ok().map(|(_, e)| e);
+        let failed = failure.is_some();
+        let (good, line) = judge(stopped, failure, secs - 0.3);
+        say!("  {label}: {line}");
+        *ok &= good;
+        steps.push(format!(
+            "{label}: {}{line}",
+            if good { "" } else { "PROBLEM " }
+        ));
+        if failed {
+            warm = None;
+        }
+        Ok(())
+    };
+    let fresh_step = |label: &str, steps: &mut Vec<String>, ok: &mut bool| -> Result<(), Error> {
+        let (good, line) = match open(device.as_deref()) {
+            Ok(opened) => {
+                let format = opened.recorder.info().device_format.sample_rate;
+                let stopped = record(&opened, 3.0);
+                let failure = opened.failures.try_recv().ok().map(|(_, e)| e);
+                let (good, line) = judge(stopped, failure, 2.7);
+                (good, format!("{line} (device at {format} Hz)"))
+            }
+            Err(e) => (false, format!("open failed: {e}")),
+        };
+        say!("  {label}: {line}");
+        *ok &= good;
+        steps.push(format!(
+            "{label}: {}{line}",
+            if good { "" } else { "PROBLEM " }
+        ));
+        Ok(())
+    };
+
+    warm_step("before the call", 3.0, None, &mut steps, &mut ok)?;
+
+    let join = "Start the call now. Continue once you are in it and the call app's microphone meter moves when you talk.";
+    if opts.recording {
+        warm_step(
+            "call started while recording",
+            3.0,
+            Some(join),
+            &mut steps,
+            &mut ok,
+        )?;
+    } else {
+        prompt(join);
+    }
+
+    // The case that matters most: an app started while the call holds the
+    // microphone.
+    let (good, line) = fresh_process(device.as_deref(), 5);
+    say!("  in the call, new process: {line}");
+    ok &= good;
+    steps.push(format!(
+        "in the call, new process: {}{line}",
+        if good { "" } else { "PROBLEM " }
+    ));
+
+    for i in 1..=3 {
+        warm_step(
+            &format!("in the call, warm #{i}"),
+            2.0,
+            None,
+            &mut steps,
+            &mut ok,
+        )?;
+    }
+    fresh_step("in the call, new recorder", &mut steps, &mut ok)?;
+    let call_ok = ask_yes(
+        "Did the call keep hearing you the whole time (meter moving, no mic warning or dropout)?",
+    );
+    ok &= call_ok;
+    steps.push(format!(
+        "call app: {}",
+        if call_ok { "ok" } else { "PROBLEM" }
+    ));
+
+    let leave = "Leave the call now, keep talking, then continue.";
+    if opts.recording {
+        prompt(leave);
+    } else {
+        warm_step(
+            "call ended while recording",
+            3.0,
+            Some(leave),
+            &mut steps,
+            &mut ok,
+        )?;
+    }
+
+    warm_step("after the call, warm", 3.0, None, &mut steps, &mut ok)?;
+    fresh_step("after the call, new recorder", &mut steps, &mut ok)?;
+
+    let summary = steps.join("; ");
+    Ok(if ok {
+        Outcome::Pass(summary)
+    } else {
+        Outcome::Fail(summary)
+    })
+}
+
+/// Runs `baseline` in a new process: a fresh CoreAudio/WASAPI/PulseAudio
+/// client, as when an application starts. Returns whether it passed, and its
+/// result with the device format it opened.
+fn fresh_process(device: Option<&str>, secs: u64) -> (bool, String) {
+    let mut child = std::process::Command::new(env::current_exe().expect("own path"));
+    child.args(["baseline", "--no-results", "--secs", &secs.to_string()]);
+    if let Some(device) = device {
+        child.args(["--device", device]);
+    }
+    let output = match child.output() {
+        Ok(output) => output,
+        Err(e) => return (false, format!("could not start a new process: {e}")),
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let result = text
+        .lines()
+        .find(|l| l.starts_with("PASS") || l.starts_with("FAIL"))
+        .or_else(|| text.lines().rev().find(|l| !l.trim().is_empty()))
+        .unwrap_or("no output")
+        .to_owned();
+    let format = text
+        .lines()
+        .find_map(|l| l.split_once(": device ").map(|(_, f)| f.to_owned()))
+        .map_or(String::new(), |f| format!(" (device {f})"));
+    (result.starts_with("PASS"), format!("{result}{format}"))
+}
+
+/// A recording is good when it is complete, at least `min_secs` long, has
+/// real audio with no 0.5 s run of digital silence, and the recorder did not
+/// fail.
+fn judge(
+    stopped: Result<Stopped<ProbeSink>, Error>,
+    failure: Option<Error>,
+    min_secs: f64,
+) -> (bool, String) {
+    let s = match stopped {
+        Ok(s) => s,
+        Err(e) => return (false, format!("error: {e}")),
+    };
+    let gap = s.sink.longest_zero_seconds();
+    let mut line = format!("{:.1} s, {:.1} dBFS", s.sink.seconds(), s.sink.dbfs());
+    if gap >= 0.5 {
+        line += &format!(", {gap:.1} s of digital silence");
+    }
+    if s.sink.peak == 0.0 {
+        line += ", all digital silence";
+    }
+    if let Some(e) = end_error(&s) {
+        line += &format!(", recorder failed: {e}");
+    } else if let Some(e) = &failure {
+        line += &format!(", recorder failed: {e}");
+    }
+    if s.dropped_frames > 0 {
+        line += &format!(", {} frames dropped", s.dropped_frames);
+    }
+    let good = s.is_complete()
+        && failure.is_none()
+        && s.sink.peak > 0.0
+        && gap < 0.5
+        && s.sink.seconds() >= min_secs;
+    (good, line)
 }
 
 fn level(stopped: &Stopped<ProbeSink>) -> String {

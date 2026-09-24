@@ -255,6 +255,8 @@ dependencies = [
  "dasp_sample",
  "log",
  "objc2-av-foundation",
+ "objc2-core-audio",
+ "objc2-core-foundation",
  "rtrb",
  "rubato",
 ]

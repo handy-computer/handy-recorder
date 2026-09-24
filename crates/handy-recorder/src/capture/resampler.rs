@@ -175,7 +175,6 @@ impl FrameResampler {
         // emits all of this output; the output of the internal padding is
         // synthetic, so the library keeps only what the count above allows
         // and zero-pads the final chunk instead.
-        // TODO(review): see TODO.md, "Final chunk: synthetic resampler output".
         if !self.in_buf[0].is_empty() {
             let result = self
                 .resampler

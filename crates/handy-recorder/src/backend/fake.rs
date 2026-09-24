@@ -35,6 +35,8 @@ struct State {
     teardown_gate: Option<Gate>,
     /// `None` reads as `Granted`.
     permission: Option<Permission>,
+    /// Every `hold_headset` call, in order.
+    headset_holds: Vec<bool>,
 }
 
 /// Holds a platform call until opened, like a driver that hangs.
@@ -125,6 +127,10 @@ impl FakeBackend {
         self.shared.state.lock().unwrap().stream.is_some()
     }
 
+    pub fn headset_holds(&self) -> Vec<bool> {
+        self.shared.state.lock().unwrap().headset_holds.clone()
+    }
+
     pub fn streams_started(&self) -> usize {
         self.shared.state.lock().unwrap().streams_started
     }
@@ -189,7 +195,11 @@ impl OpenDevice for FakeOpenDevice {
 
 struct FakeStream(FakeBackend);
 
-impl InputStream for FakeStream {}
+impl InputStream for FakeStream {
+    fn hold_headset(&mut self, hold: bool) {
+        self.0.shared.state.lock().unwrap().headset_holds.push(hold);
+    }
+}
 
 impl Drop for FakeStream {
     fn drop(&mut self) {

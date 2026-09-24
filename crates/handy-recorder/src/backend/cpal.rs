@@ -174,7 +174,6 @@ impl Backend for CpalBackend {
                     })
                     .map(|(info, _)| info)
                     .unwrap_or_else(|| InputDevice {
-                        // TODO(review): see TODO.md, "Default device without an ID".
                         id: id.as_ref().map_or_else(String::new, ToString::to_string),
                         name: device_name(&device),
                         occurrence: 0,
@@ -259,9 +258,83 @@ struct CpalOpenDevice {
     config_cache: ConfigCache,
 }
 
-struct CpalStream(#[allow(dead_code)] cpal::Stream);
+struct CpalStream {
+    _stream: cpal::Stream,
+    /// The input device's ID, for finding its headset's output device.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    device_id: Option<cpal::DeviceId>,
+    /// The silent output stream holding the headset (`take_headset`).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    headset: Option<cpal::Stream>,
+}
 
-impl InputStream for CpalStream {}
+impl InputStream for CpalStream {
+    #[cfg(target_os = "macos")]
+    fn hold_headset(&mut self, hold: bool) {
+        if !hold {
+            if self.headset.take().is_some() {
+                log::debug!("released the headset");
+            }
+            return;
+        }
+        if self.headset.is_some() {
+            return;
+        }
+        let Some(id) = &self.device_id else {
+            return;
+        };
+        let Some(output_uid) = super::headset_macos::bluetooth_output_uid(id.id()) else {
+            // Not a Bluetooth headset.
+            return;
+        };
+        let started = Instant::now();
+        match silent_output(&cpal::DeviceId::new(id.host(), &output_uid)) {
+            Ok(stream) => {
+                log::info!(
+                    "holding the headset: silent output on {output_uid} (started in {:?})",
+                    started.elapsed()
+                );
+                self.headset = Some(stream);
+            }
+            Err(e) => log::warn!("cannot hold the headset ({output_uid}): {e}"),
+        }
+    }
+}
+
+/// Starts a stream playing silence on the output device `id`.
+#[cfg(target_os = "macos")]
+fn silent_output(id: &cpal::DeviceId) -> Result<cpal::Stream, String> {
+    let host = cpal::host_from_id(id.host()).map_err(|e| e.to_string())?;
+    let device = host
+        .device_by_id(id)
+        .ok_or_else(|| "the output device is gone".to_owned())?;
+    let config = device.default_output_config().map_err(|e| e.to_string())?;
+    let format = config.sample_format();
+    // All-zero bytes are silence only for signed and float samples.
+    if !matches!(
+        format,
+        cpal::SampleFormat::F32
+            | cpal::SampleFormat::F64
+            | cpal::SampleFormat::I8
+            | cpal::SampleFormat::I16
+            | cpal::SampleFormat::I32
+    ) {
+        return Err(format!("unsupported output sample format {format:?}"));
+    }
+    let stream = device
+        .build_output_stream_raw(
+            config.config(),
+            format,
+            |data: &mut cpal::Data, _: &cpal::OutputCallbackInfo| data.bytes_mut().fill(0),
+            // Runs on the audio thread; the headset is best effort, and the
+            // input stream reports anything that matters.
+            |_| {},
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+    stream.play().map_err(|e| e.to_string())?;
+    Ok(stream)
+}
 
 impl OpenDevice for CpalOpenDevice {
     fn info(&self) -> &InputDevice {
@@ -306,11 +379,15 @@ impl OpenDevice for CpalOpenDevice {
                 // The device accepted this config; remember it so the next
                 // open skips the HAL property queries entirely.
                 if !self.config_was_cached
-                    && let Some(device_id) = self.device_id
+                    && let Some(device_id) = self.device_id.clone()
                 {
                     *self.config_cache.lock().unwrap() = Some((device_id, self.config));
                 }
-                Ok(Box::new(CpalStream(stream)))
+                Ok(Box::new(CpalStream {
+                    _stream: stream,
+                    device_id: self.device_id,
+                    headset: None,
+                }))
             }
             Err(e) => {
                 // A failed open may mean the cached config went stale
@@ -348,7 +425,6 @@ fn map_error_during(step: &str, e: cpal::Error) -> BackendError {
     BackendError::new(map_kind(e.kind()), format!("{step}: {e}"))
 }
 
-// TODO(review): see TODO.md, "Allocation in the error callback".
 fn map_error(e: cpal::Error) -> BackendError {
     let kind = map_kind(e.kind());
     if kind.stream_survives() {

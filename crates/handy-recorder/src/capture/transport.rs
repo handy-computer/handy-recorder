@@ -19,8 +19,9 @@ pub(crate) struct CaptureTransportState {
     pub pause_acknowledged: AtomicBool,
     /// Frames the callback could not fit into the ring.
     pub overrun_frames: AtomicU64,
-    /// Callbacks received, including silent ones during a pause. The
-    /// watchdog's measure of progress; it never looks at amplitude.
+    /// Callbacks received with at least one frame, including silent ones
+    /// during a pause. The watchdog's measure of progress; it never looks
+    /// at amplitude.
     pub callbacks: AtomicU64,
     /// Test-only: Start commands the consumer has applied. Lets a test write
     /// a recording's first block only once it cannot be discarded as idle
@@ -69,7 +70,13 @@ pub(crate) fn write_input_to_ring<T>(
 ) where
     T: InputSample,
 {
-    transport.callbacks.fetch_add(1, Ordering::Relaxed);
+    // Only blocks carrying at least one frame count as progress, so a
+    // backend that keeps calling back with empty blocks still trips the
+    // watchdog.
+    let frame_count = data.len() / channels;
+    if frame_count > 0 {
+        transport.callbacks.fetch_add(1, Ordering::Relaxed);
+    }
 
     // Forward the first block that observes a pause; once acknowledged,
     // remain silent until the consumer resumes capture.
@@ -80,7 +87,6 @@ pub(crate) fn write_input_to_ring<T>(
     }
 
     let out_channels = routing.output_channels(channels);
-    let frame_count = data.len() / channels;
     let writable_frames = (producer.slots() / out_channels).min(frame_count);
     let written = if writable_frames == 0 {
         0

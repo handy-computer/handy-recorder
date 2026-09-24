@@ -168,6 +168,7 @@ where
             None => Channels::MixToMono,
         },
         frames_per_chunk: Some(frame_samples),
+        ..RecorderConfig::default()
     };
     let recorder: Recorder<Chunks> = support::open(&fake, config);
 

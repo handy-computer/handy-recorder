@@ -19,11 +19,13 @@ it, and `cargo build` / `cargo test` at the repository root do not touch it.
 
 ```sh
 git clone <repo> && cd handy-recorder
-cargo run -p handy-recorder-probe -- <probe> [--device <id>] [--secs <n>] [--recording]
+cargo run -p handy-recorder-probe -- <probe> [--device <id>] [--secs <n>] [--recording] [--take-headset]
 ```
 
 `cargo run -p handy-recorder-probe` with no probe name lists them. The
-first build takes a minute; later runs start at once.
+first build takes a minute; later runs start at once. `--take-headset` opens
+every recorder with `RecorderConfig::take_headset` (macOS, Bluetooth
+headsets).
 
 ## Results
 
@@ -69,6 +71,7 @@ a laptop behave differently around sleep and Bluetooth).
 | 5b | `bluetooth-handoff` | a headset shared with a phone (AirPods): move it to the phone mid-recording, then back | a device loss, or real audio; FAIL means a stale stream (digital silence, no failure). Coming back works |
 | 6 | `slow-start` | Bluetooth headset worn, idle | PASS: first audio well under 10 s (the `NoAudio` bound) |
 | 7 | `external-app` | a meeting app's test call, both orders | PASS: neither side disrupted |
+| 7b | `meeting-app` | a real call (Google Meet, Zoom, Teams): start it, stay in it, leave it, when told; again with `--recording`; on the built-in mic and on a Bluetooth headset | PASS: a new process started during the call records real audio (the most important check); every recording real and complete, before, during, and after the call, on the recorder kept open throughout and on new ones; the call app unaffected |
 | 8 | `default-change` | switch the default input mid-recording | INFO: the recorder stays on its device, no silent switch |
 | 9 | `sleep-wake` | sleep 30 s+, wake, Enter | PASS: an idle recorder survives sleep |
 | 10 | `sleep-wake --recording` | the same, while recording | INFO: `Stalled` (a sleep ends the recording by design) or a device loss |
@@ -96,8 +99,11 @@ The first real run of the WASAPI backend. Pay attention to:
 - **Disconnect (3-5):** also try disabling the device in Settings > System >
   Sound > the device > Disable, as a variant of unplugging.
 - **Default change (8):** CPAL reports a default-device change on a stream
-  opened on the default device as `StreamInvalidated`; the library opens the
-  resolved device, so expect no failure, but record what happens.
+  opened on the default device as `StreamInvalidated`. The library still
+  opens the default through CPAL's default-device handle, so expect the
+  recorder to fail with `StreamInvalidated` until it opens the resolved
+  device instead (TODO.md, "Default device changing mid-recording"). Record
+  what happens.
 - **Bluetooth (5, 6):** the headset switches to its hands-free profile when
   the microphone opens; note the rate `list`/`slow-start` report.
 - **Sleep (9-11):** laptops with Modern Standby may keep audio running;
@@ -156,6 +162,7 @@ plain PulseAudio; the results header says which ("sound server").
 | `slow-sink` | a sink blocking its first call for `--secs` (3: overrun counted; 12: `SinkStalled`) | |
 | `second-process` | another process records 8 s; this one opens 3 s in, records 3 s, closes; both complete, and the other keeps getting audio | |
 | `external-app` | record alongside a real app in both orders; neither is disrupted | a recording app |
+| `meeting-app` | during a real call, a new process opens the microphone and records 5 s (an app started mid-call); plus one recorder kept open across the call: recording before it, while it starts (`--recording`) or ends, three push-to-talk recordings during it, and after it; and a new recorder during and after | a call app |
 | `slow-start` | time from open to first audio | a Bluetooth headset |
 | `disconnect-recording` | failure reported, audio before it kept, `start` returns it, reopen after reconnect works | a removable device |
 | `disconnect-idle` | the same while the recorder is open but idle | a removable device |

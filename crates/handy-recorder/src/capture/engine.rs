@@ -37,7 +37,6 @@ use crate::{
 const AUDIO_RING_SECONDS: usize = 2;
 
 /// Output rates outside this range are `UnsupportedFormat`.
-// TODO(review): see TODO.md, "Format limits".
 const MIN_OUTPUT_RATE: u32 = 1_000;
 const MAX_OUTPUT_RATE: u32 = 768_000;
 /// Chunks longer than this are `UnsupportedFormat`.
@@ -112,6 +111,11 @@ pub(crate) struct Shared {
     pub heartbeat: AtomicU64,
     /// Platform errors the stream survived (xruns, real-time denied).
     pub survived_errors: AtomicU64,
+    /// Xruns since the current recording started: audio the platform lost
+    /// before the callback, of unknown length (WASAPI discontinuities, ALSA
+    /// overruns, CoreAudio overloads). Logged at `stop`, not counted in
+    /// `dropped_frames`.
+    pub xruns: AtomicU64,
     /// When the current recording started; `None` while idle. The watchdog
     /// fails the recorder on a stall only while this is set.
     recording_since: Mutex<Option<Instant>>,
@@ -127,6 +131,7 @@ impl Shared {
             started_at: OnceLock::new(),
             heartbeat: AtomicU64::new(0),
             survived_errors: AtomicU64::new(0),
+            xruns: AtomicU64::new(0),
             recording_since: Mutex::new(None),
             device_tx,
         }
@@ -165,6 +170,8 @@ enum DeviceMsg {
     Failed,
     /// Close: tear down and exit.
     Close,
+    /// Start or stop holding the headset (`take_headset`).
+    HoldHeadset(bool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,6 +210,7 @@ pub(crate) struct Engine<S> {
     slot: Mutex<Slot>,
     threads: Mutex<Option<Threads>>,
     timeouts: Timeouts,
+    take_headset: bool,
 }
 
 /// What the device thread hands back from a successful open.
@@ -220,6 +228,7 @@ impl<S: Sink> Engine<S> {
     ) -> Result<Self, Error> {
         timeouts.validate();
         validate_request(&config)?;
+        let take_headset = config.take_headset;
 
         let (device_tx, device_rx) = mpsc::channel();
         let shared = Arc::new(Shared::new(device_tx.clone()));
@@ -344,6 +353,7 @@ impl<S: Sink> Engine<S> {
                 device_tx,
             })),
             timeouts,
+            take_headset,
         })
     }
 
@@ -386,6 +396,9 @@ impl<S: Sink> Engine<S> {
         }
         *slot = Slot::Recording;
         *self.shared.recording_since.lock().unwrap() = Some(Instant::now());
+        if self.take_headset {
+            let _ = self.shared.device_tx.send(DeviceMsg::HoldHeadset(true));
+        }
         Ok(())
     }
 
@@ -398,6 +411,9 @@ impl<S: Sink> Engine<S> {
             *slot = Slot::Stopping;
         }
         let result = self.collect();
+        if self.take_headset {
+            let _ = self.shared.device_tx.send(DeviceMsg::HoldHeadset(false));
+        }
         *self.shared.recording_since.lock().unwrap() = None;
         *self.slot.lock().unwrap() = Slot::Idle;
         result
@@ -421,18 +437,17 @@ impl<S: Sink> Engine<S> {
         match reply_rx.recv_timeout(self.timeouts.stop) {
             Ok(stopped) => Ok(stopped),
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                let error =
-                    self.shared
-                        .fail(
-                            self.shared
-                                .error(ErrorKind::SinkStalled)
-                                .with_detail(format!(
-                                    "stop did not complete within {:.1} s",
-                                    self.timeouts.stop.as_secs_f64()
-                                )),
-                        );
-                log::error!("recording lost: {error}");
-                Err(error)
+                let stalled = self
+                    .shared
+                    .error(ErrorKind::SinkStalled)
+                    .with_detail(format!(
+                        "stop did not complete within {:.1} s",
+                        self.timeouts.stop.as_secs_f64()
+                    ));
+                // Log the sink as the cause even when an earlier failure
+                // (a lost device, say) stays the recorder's error.
+                log::error!("recording lost: {stalled}");
+                Err(self.shared.fail(stalled))
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 // The delivery thread already failed (a stalled sink the
@@ -664,6 +679,9 @@ fn open_stream(
         // counted; others go to the device thread, which fails the recorder.
         if error.kind.stream_survives() {
             error_shared.survived_errors.fetch_add(1, Ordering::Relaxed);
+            if error.kind == BackendErrorKind::Xrun {
+                error_shared.xruns.fetch_add(1, Ordering::Relaxed);
+            }
         } else {
             let _ = error_tx.send(DeviceMsg::StreamError(error));
         }
@@ -721,6 +739,11 @@ fn run_device(
                 if stream.is_some() {
                     let error = runtime_error(&shared, error);
                     shared.fail(error);
+                }
+            }
+            Ok(DeviceMsg::HoldHeadset(hold)) => {
+                if let Some(stream) = stream.as_mut() {
+                    stream.hold_headset(hold);
                 }
             }
             Ok(DeviceMsg::Failed) | Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -795,7 +818,6 @@ impl Watchdog {
         }
     }
 
-    // TODO(review): see TODO.md, "Watchdog false positives".
     fn check(&mut self, shared: &Shared, timeouts: &Timeouts) {
         let now = Instant::now();
         let callbacks = shared.transport.callbacks.load(Ordering::Relaxed);

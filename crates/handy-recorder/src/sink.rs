@@ -20,6 +20,14 @@ pub trait Sink: Send + 'static {
     fn process_chunk(&mut self, chunk: AudioChunk<'_>);
 }
 
+/// Lets a recorder take `Box<dyn Sink>`. The orphan rule stops applications
+/// from writing this themselves.
+impl<S: Sink + ?Sized> Sink for Box<S> {
+    fn process_chunk(&mut self, chunk: AudioChunk<'_>) {
+        (**self).process_chunk(chunk);
+    }
+}
+
 /// Exactly `frames_per_chunk` frames of interleaved audio.
 #[derive(Debug, Clone, Copy)]
 pub struct AudioChunk<'a> {
@@ -30,6 +38,22 @@ pub struct AudioChunk<'a> {
     /// Frames of real audio. Equal to `frames_per_chunk` except in the final
     /// chunk, whose remainder is zero padding.
     pub valid_frames: usize,
+}
+
+impl AudioChunk<'_> {
+    /// True when every real sample in this chunk is exactly zero (the final
+    /// chunk's zero padding is ignored).
+    ///
+    /// A real microphone always has a noise floor, so a run of these usually
+    /// means a muted device, a Bluetooth headset connected to another device
+    /// (it can stay listed here and deliver zeros), or denied access. A
+    /// device's first few hundred milliseconds can be zeros too. The library
+    /// only logs digital silence; what counts as too long, and what to tell
+    /// the user, is the application's decision.
+    pub fn is_digital_silence(&self) -> bool {
+        let real = self.valid_frames * self.channels as usize;
+        self.samples[..real].iter().all(|&s| s == 0.0)
+    }
 }
 
 /// Collects a recording's real audio (padding excluded) in memory.
@@ -53,5 +77,27 @@ impl Sink for CollectingSink {
     fn process_chunk(&mut self, chunk: AudioChunk<'_>) {
         let real = chunk.valid_frames * chunk.channels as usize;
         self.samples.extend_from_slice(&chunk.samples[..real]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AudioChunk;
+
+    fn chunk(samples: &[f32], channels: u16, valid_frames: usize) -> AudioChunk<'_> {
+        AudioChunk {
+            samples,
+            sample_rate: 16_000,
+            channels,
+            valid_frames,
+        }
+    }
+
+    #[test]
+    fn digital_silence_means_every_real_sample_is_exactly_zero() {
+        assert!(chunk(&[0.0; 4], 1, 4).is_digital_silence());
+        assert!(!chunk(&[0.0, 0.0, 1e-9, 0.0], 1, 4).is_digital_silence());
+        // Stereo: one nonzero sample in either channel is enough.
+        assert!(!chunk(&[0.0, 0.0, 0.0, -0.5], 2, 2).is_digital_silence());
     }
 }

@@ -234,6 +234,7 @@ impl<S: Sink> Processor<S> {
             .transport
             .overrun_frames
             .store(0, Ordering::Release);
+        self.shared.xruns.store(0, Ordering::Relaxed);
         self.resampler.reset();
         self.active = Some(Active {
             sink,
@@ -259,8 +260,17 @@ impl<S: Sink> Processor<S> {
     /// Drain up to one bounded chunk from the ring. Returns the number of
     /// samples consumed so callers can tell an empty ring from a busy one.
     fn drain(&mut self, consumer: &mut Consumer<f32>, disposition: ChunkDisposition) -> usize {
+        self.drain_at_most(consumer, disposition, self.max_drain_samples)
+    }
+
+    fn drain_at_most(
+        &mut self,
+        consumer: &mut Consumer<f32>,
+        disposition: ChunkDisposition,
+        max_samples: usize,
+    ) -> usize {
         self.beat();
-        let max_samples = self.max_drain_samples;
+        let max_samples = max_samples.min(self.max_drain_samples);
         let channels = self.channels;
         drain_available_samples(consumer, max_samples, channels, |raw| {
             self.process_raw_chunk(raw, disposition)
@@ -336,8 +346,18 @@ impl<S: Sink> Processor<S> {
         }
     }
 
+    /// Drains the audio in the ring now, not audio written while draining:
+    /// a failed stream that is not yet torn down can keep writing faster
+    /// than a slow sink consumes, and the drain must still end.
     fn drain_all(&mut self, consumer: &mut Consumer<f32>) {
-        while self.drain(consumer, ChunkDisposition::Capture) > 0 {}
+        let mut remaining = consumer.slots();
+        while remaining > 0 {
+            let drained = self.drain_at_most(consumer, ChunkDisposition::Capture, remaining);
+            if drained == 0 {
+                break;
+            }
+            remaining -= drained;
+        }
         let overrun = self
             .shared
             .transport
@@ -443,7 +463,6 @@ impl<S: Sink> Processor<S> {
             active.overrun_episodes,
             active.first_chunk_after,
         );
-        // TODO(review): see TODO.md, "Digital silence".
         let rate = self.in_sample_rate as f64;
         if active.input_frames > 0 && !active.heard_nonzero {
             log::warn!(
@@ -454,6 +473,15 @@ impl<S: Sink> Processor<S> {
             log::warn!(
                 "the recording contained {:.1} s of exact digital silence: a muted device or a stalled stream",
                 longest_zero_run as f64 / rate
+            );
+        }
+        // REVIEW(xruns): reported in the log only; `is_complete` does not
+        // see them yet.
+        let xruns = self.shared.xruns.swap(0, Ordering::Relaxed);
+        if xruns > 0 {
+            log::warn!(
+                "the platform reported {xruns} xruns during the recording: audio may be missing \
+                 before the library received it, not counted in dropped_frames"
             );
         }
         if !stopped.is_complete() {

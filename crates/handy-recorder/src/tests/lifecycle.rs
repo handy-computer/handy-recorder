@@ -3,7 +3,9 @@
 
 use std::{sync::Arc, thread};
 
-use super::support::{self, Chunks, fake, open, push_idle, ramp, start, stop_with_boundary};
+use super::support::{
+    self, Chunks, fake, open, push_idle, ramp, start, stop_with_boundary, wait_until,
+};
 use crate::{Channels, CollectingSink, EndReason, ErrorKind, Recorder, RecorderConfig};
 
 /// 16 kHz mono in, 16 kHz mono out: no resampling, so samples pass through
@@ -231,4 +233,56 @@ fn collecting_sink_keeps_only_real_audio() {
     let mut expected = audio;
     expected.extend_from_slice(&[0.5, -0.5]);
     assert_eq!(stopped.sink.into_samples(), expected);
+}
+
+#[test]
+fn take_headset_holds_the_headset_only_while_recording() {
+    let fake = fake(16_000, 1);
+    let recorder: Recorder<Chunks> = open(
+        &fake,
+        RecorderConfig {
+            take_headset: true,
+            ..passthrough(160)
+        },
+    );
+    for cycle in 1..=2 {
+        start(&recorder, Chunks::default());
+        wait_until("the headset is held", || {
+            fake.headset_holds().len() == 2 * cycle - 1
+        });
+        stop_with_boundary(&recorder, &fake, &[0.5f32]).unwrap();
+        wait_until("the headset is released", || {
+            fake.headset_holds().len() == 2 * cycle
+        });
+    }
+    assert_eq!(fake.headset_holds(), [true, false, true, false]);
+}
+
+#[test]
+fn without_take_headset_the_headset_is_left_alone() {
+    let fake = fake(16_000, 1);
+    let recorder: Recorder<Chunks> = open(&fake, passthrough(160));
+    start(&recorder, Chunks::default());
+    stop_with_boundary(&recorder, &fake, &[0.5f32]).unwrap();
+    recorder.close().unwrap();
+    assert!(fake.headset_holds().is_empty());
+}
+
+#[test]
+fn a_boxed_sink_records_like_any_other() {
+    struct Forwards(std::sync::mpsc::Sender<usize>);
+    impl crate::Sink for Forwards {
+        fn process_chunk(&mut self, chunk: crate::AudioChunk<'_>) {
+            let _ = self.0.send(chunk.valid_frames);
+        }
+    }
+    let fake = fake(16_000, 1);
+    let recorder: Recorder<Box<dyn crate::Sink>> = open(&fake, passthrough(160));
+    let (tx, rx) = std::sync::mpsc::channel();
+    start(&recorder, Box::new(Forwards(tx)));
+    assert!(fake.push(&ramp(0, 320)));
+    let stopped = stop_with_boundary(&recorder, &fake, &ramp(320, 10)).unwrap();
+    assert!(stopped.is_complete());
+    drop(stopped);
+    assert_eq!(rx.iter().sum::<usize>(), 330);
 }

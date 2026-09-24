@@ -2,7 +2,11 @@
 //! the watchdog, the failure handler, and bounded waits.
 
 use std::{
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -153,6 +157,69 @@ fn a_device_that_never_delivers_audio_fails_with_no_audio() {
         ErrorKind::NoAudio
     );
     assert!(stopped.sink.chunks.is_empty());
+}
+
+#[test]
+fn a_slow_sink_and_a_stream_still_running_after_failure_do_not_hold_up_stop() {
+    struct Slow;
+    impl Sink for Slow {
+        fn process_chunk(&mut self, _: AudioChunk<'_>) {
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+    let fake = fake(16_000, 1);
+    let recorder: Recorder<Slow> = open(&fake, passthrough());
+    // The failed stream's teardown hangs, so its callback keeps writing
+    // far faster than the sink consumes.
+    let gate = fake.hang_teardown();
+    start(&recorder, Slow);
+    let pushing = AtomicBool::new(true);
+    let stopped = thread::scope(|scope| {
+        scope.spawn(|| {
+            while pushing.load(Ordering::Relaxed) {
+                fake.push(&[0.1f32; 1_600]);
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+        // Let a backlog build, then fail with the callback still running.
+        thread::sleep(Duration::from_millis(100));
+        assert!(fake.report_error(lost()));
+        support::wait_until("the failure is recorded", || {
+            recorder.engine.shared.failure().is_some()
+        });
+        let stopped = recorder.stop();
+        pushing.store(false, Ordering::Relaxed);
+        stopped
+    });
+    // Before the fix, the failure drain chased the callback forever and
+    // stop hit its deadline with `SinkStalled`, losing the recording.
+    let stopped = stopped.expect("stop returns the recording");
+    assert_eq!(
+        recorder_failed(&stopped.end_reason).kind(),
+        ErrorKind::DeviceLost
+    );
+    gate.open();
+}
+
+#[test]
+fn empty_callbacks_do_not_count_as_audio() {
+    let fake = fake(16_000, 1);
+    let mut t = timeouts();
+    t.no_audio = Duration::from_millis(150);
+    let (recorder, failures) = open_notified::<Chunks>(&fake, passthrough(), t);
+    start(&recorder, Chunks::default());
+
+    let deadline = Instant::now() + support::WAIT;
+    let error = loop {
+        fake.push::<f32>(&[]);
+        if let Ok(error) = failures.try_recv() {
+            break error;
+        }
+        assert!(Instant::now() < deadline, "no failure notification");
+        thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(error.kind(), ErrorKind::NoAudio);
+    recorder.stop().expect("stop");
 }
 
 #[test]
