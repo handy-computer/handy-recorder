@@ -1,2 +1,4 @@
 /target
 *.swp
+# Probe results: hardware session output, shared by hand, not committed.
+/tools/probe/results/

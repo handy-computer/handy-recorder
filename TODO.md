@@ -113,8 +113,8 @@ Location: `backend/cpal.rs` (`map_error`), `capture/engine.rs` (`open_stream`).
   reading. A test hook that injects a resampler error would cover it.
 - Real hardware: device loss, stream invalidation, default-device changes,
   sleep/wake, and slow Bluetooth start are probed on macOS only. The
-  tier-3 probes live outside this repository for now
-  (`../handy-recorder-probe`; DESIGN.md places them at `tools/probe/`).
+  tier-3 probes are in `tools/probe/` (see its README for the
+  per-platform checklist).
   macOS results (MacBook Pro, AirPods Pro 3, USB-C EarPods): device loss
   reported as `DeviceLost` in about 2 s (USB) with the audio before it
   kept, while recording and idle; reopen after reconnect works; AirPods

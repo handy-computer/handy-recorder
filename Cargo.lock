@@ -260,6 +260,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "handy-recorder-probe"
+version = "0.0.0"
+dependencies = [
+ "cpal",
+ "handy-recorder",
+ "log",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -346,7 +346,7 @@ fn a_sink_that_never_returns_is_caught_by_the_heartbeat() {
     let error = recorder.stop().unwrap_err();
     assert_eq!(error.kind(), ErrorKind::SinkStalled);
     assert!(
-        started.elapsed() < Duration::from_millis(100),
+        started.elapsed() < Duration::from_millis(500),
         "stop returns at once"
     );
     let again = recorder

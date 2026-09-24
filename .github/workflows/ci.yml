@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install ALSA headers (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev
+      - uses: Swatinem/rust-cache@v2
+      # The library and the probe, warnings as errors.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The library's tests (tier 1, fake backend). The probe has none; the
+      # hardware tests are #[ignore]d and run by hand.
+      - run: cargo test
+      # The probe builds on every platform, so a hardware session never
+      # starts with a compile error.
+      - run: cargo build -p handy-recorder-probe
