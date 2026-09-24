@@ -42,6 +42,12 @@ struct CaptureTransportState {
     /// remain silent until the consumer clears the request.
     pause_acknowledged: AtomicBool,
     overrun_samples: AtomicU64,
+    /// Test-only: Start commands the consumer has applied. Lets a test write
+    /// a recording's first block only once it cannot be discarded as idle
+    /// audio (the consumer may drain between its command check and a Start
+    /// sent just after it).
+    #[cfg(test)]
+    starts_applied: std::sync::atomic::AtomicUsize,
 }
 
 /// Callback invoked with each 16 kHz mono frame while recording. Used to feed
@@ -801,6 +807,8 @@ fn run_consumer(
                         transport.overrun_samples.store(0, Ordering::Release);
                         processor.begin_recording(ready_tx);
                         recording = true;
+                        #[cfg(test)]
+                        transport.starts_applied.fetch_add(1, Ordering::Release);
                     }
                     Cmd::Stop(reply_tx) => {
                         processor
@@ -887,5 +895,7 @@ fn run_consumer(
     }
 }
 
+#[cfg(test)]
+mod equivalence;
 #[cfg(test)]
 mod tests;

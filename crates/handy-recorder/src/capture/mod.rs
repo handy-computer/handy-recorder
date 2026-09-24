@@ -8,6 +8,8 @@
 //! including the parts the design replaces later (see DESIGN.md, "Extraction
 //! from Handy").
 
+#[cfg(test)]
+mod handy_reference;
 mod recorder;
 mod resampler;
 
