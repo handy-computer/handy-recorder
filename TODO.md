@@ -8,6 +8,11 @@ Two pre-release items live in DESIGN.md, "Before the first release": the
 Rubato 5.x upgrade and the review of every internal timeout (marked
 `REVIEW(timeouts)` in the code).
 
+Current timeout placeholders (`capture/engine.rs`, `Timeouts::default`):
+open 10 s, close 5 s, delivery-thread exit at close 1 s, no audio after
+open 10 s, stall 5 s, sink heartbeat 10 s, stop's pause acknowledgement
+2 s (Handy's value), stop's overall deadline 5 s, watchdog tick 50 ms.
+
 ## Decisions to review
 
 ### Device enumeration on every open
