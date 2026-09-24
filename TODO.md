@@ -157,6 +157,9 @@ access was revoked while it was open. `NotDetermined` is left alone: macOS
 shows its prompt then, and what a recording does while the prompt is up
 belongs to the permission-request prototype.
 
+Confirmed on hardware: with access denied, `open` fails with
+`PermissionDenied` naming the device and the settings pane.
+
 Location: `capture/engine.rs` (`open_stream`, `Engine::start`).
 
 ### Digital silence
@@ -197,6 +200,10 @@ review:
   recording starts, after up to the stall bound (5 s) of it. `NoAudio`
   (no callback ever) still fails while idle.
 - AirPods disconnect when the Mac sleeps; that is reported as `DeviceLost`.
+
+Confirmed on hardware after the change: an idle recorder survives sleep
+(callbacks resumed 20.7 s after the idle stall was logged) and records
+normally after wake.
 
 Location: `capture/engine.rs`, `Watchdog::check`.
 
