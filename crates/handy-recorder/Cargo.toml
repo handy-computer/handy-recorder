@@ -6,3 +6,19 @@ description = "Cross-platform microphone capture: exact, ordered, framed audio o
 publish = false
 
 [dependencies]
+# Sample conversion to f32. cpal 0.18 re-exports the same crate; depending on
+# it directly keeps conversion independent of the backend's cpal version.
+dasp_sample = "0.11"
+log = "0.4"
+rtrb = "0.4.0"
+# Pinned to the version Handy ships, so the extracted pipeline stays
+# sample-identical to Handy's. Upgrading is a tracked pre-release item
+# (DESIGN.md, "Before the first release").
+rubato = "=0.16.2"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+cpal = "0.18.2"
+
+# The native PulseAudio host (also serves pipewire-pulse), with ALSA fallback.
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { version = "0.18.2", features = ["pulseaudio"] }
