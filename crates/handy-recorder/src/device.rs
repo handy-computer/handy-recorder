@@ -1,10 +1,13 @@
-use crate::Error;
+use crate::backend::{Backend, cpal::CpalBackend};
+use crate::{Error, ErrorKind};
 
 /// Lists input devices.
 ///
 /// Callable at any time, from any thread, with or without a recorder open.
 pub fn list_input_devices() -> Result<Vec<InputDevice>, Error> {
-    todo!()
+    CpalBackend::shared()
+        .list_input_devices()
+        .map_err(|e| Error::new(ErrorKind::Backend).with_detail(e.message.into_owned()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,5 +45,31 @@ pub enum Permission {
 
 /// Microphone permission status. A synchronous read; never prompts.
 pub fn permission_status() -> Permission {
-    todo!()
+    platform_permission_status()
+}
+
+#[cfg(target_os = "macos")]
+fn platform_permission_status() -> Permission {
+    use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
+
+    // SAFETY: AVMediaTypeAudio is an immutable framework constant.
+    let Some(audio) = (unsafe { AVMediaTypeAudio }) else {
+        return Permission::Unknown;
+    };
+    // SAFETY: audio is a valid media type (video or audio are the only ones
+    // that do not raise).
+    let status = unsafe { AVCaptureDevice::authorizationStatusForMediaType(audio) };
+    match status {
+        AVAuthorizationStatus::Authorized => Permission::Granted,
+        // Restricted: blocked by policy (parental controls, MDM); the user
+        // cannot grant it either.
+        AVAuthorizationStatus::Denied | AVAuthorizationStatus::Restricted => Permission::Denied,
+        AVAuthorizationStatus::NotDetermined => Permission::NotDetermined,
+        _ => Permission::Unknown,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_permission_status() -> Permission {
+    Permission::Unknown
 }

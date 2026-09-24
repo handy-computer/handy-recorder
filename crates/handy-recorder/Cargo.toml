@@ -22,3 +22,7 @@ cpal = "0.18.2"
 # The native PulseAudio host (also serves pipewire-pulse), with ALSA fallback.
 [target.'cfg(target_os = "linux")'.dependencies]
 cpal = { version = "0.18.2", features = ["pulseaudio"] }
+
+# Microphone permission status (AVCaptureDevice authorization).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat"] }

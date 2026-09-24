@@ -58,9 +58,6 @@
 //! # }
 //! ```
 
-// Skeleton: every body is `todo!()`. Remove once the implementation lands.
-#![allow(unused_variables, dead_code)]
-
 mod backend;
 mod capture;
 mod device;
@@ -68,16 +65,19 @@ mod error;
 mod sink;
 mod types;
 
+#[cfg(test)]
+mod tests;
+
 pub use device::{InputDevice, Permission, list_input_devices, permission_status};
 pub use error::{Error, ErrorKind};
 pub use sink::{AudioChunk, CollectingSink, Sink};
-pub use types::{
-    Channels, EndReason, Format, RecorderConfig, RecorderInfo,
-};
+pub use types::{Channels, EndReason, Format, RecorderConfig, RecorderInfo};
 
 use std::fmt;
-use std::marker::PhantomData;
-use std::sync::Mutex;
+use std::sync::Arc;
+
+use backend::{Backend, cpal::CpalBackend};
+use capture::engine::{Engine, Timeouts};
 
 // ---------------------------------------------------------------------------
 // Recorder
@@ -91,7 +91,7 @@ use std::sync::Mutex;
 ///
 /// Dropping it is `close`.
 pub struct Recorder<S> {
-    _sink: PhantomData<Mutex<S>>,
+    pub(crate) engine: Engine<S>,
 }
 
 impl<S: Sink> Recorder<S> {
@@ -109,7 +109,7 @@ impl<S: Sink> Recorder<S> {
     /// [`open_with_failure_handler`](Self::open_with_failure_handler)
     /// to capture failures
     pub fn open(config: RecorderConfig) -> Result<Self, Error> {
-        todo!()
+        Self::open_with(CpalBackend::shared(), config, None, Timeouts::default())
     }
 
     /// `open`, plus a function called the moment this recorder fails. The
@@ -118,13 +118,31 @@ impl<S: Sink> Recorder<S> {
         config: RecorderConfig,
         handler: impl FnOnce(Error) + Send + 'static,
     ) -> Result<Self, Error> {
-        todo!()
+        Self::open_with(
+            CpalBackend::shared(),
+            config,
+            Some(Box::new(handler)),
+            Timeouts::default(),
+        )
+    }
+
+    /// `open` with a chosen backend and internal bounds (the fake backend
+    /// and short timeouts in tests).
+    pub(crate) fn open_with(
+        backend: Arc<dyn Backend>,
+        config: RecorderConfig,
+        handler: Option<Box<dyn FnOnce(Error) + Send + 'static>>,
+        timeouts: Timeouts,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            engine: Engine::open(backend, config, handler, timeouts)?,
+        })
     }
 
     /// What was opened: the device, the format it runs at, and the format
     /// the sink receives. Can be called once `open` returns.
     pub fn info(&self) -> &RecorderInfo {
-        todo!()
+        self.engine.info()
     }
 
     /// Starts a recording into `sink`
@@ -133,7 +151,7 @@ impl<S: Sink> Recorder<S> {
     /// Fails only with `AlreadyRecording` or the error the recorder failed
     /// with; the sink always comes back in the error.
     pub fn start(&self, sink: S) -> Result<(), StartError<S>> {
-        todo!()
+        self.engine.start(sink)
     }
 
     /// Ends the recording and hands back the sink.
@@ -161,19 +179,22 @@ impl<S: Sink> Recorder<S> {
     /// diagnostics (overrun episodes, time to first audio, frame counts) are
     /// logged at `debug`.
     pub fn stop(&self) -> Result<Stopped<S>, Error> {
-        todo!()
+        self.engine.stop()
     }
 
     /// Closes the microphone. An active recording is discarded; call `stop`
     /// first to keep it.
     pub fn close(self) -> Result<(), Error> {
-        todo!()
+        // `drop` then finds the recorder already closed.
+        self.engine.shutdown()
     }
 }
 
 impl<S> Drop for Recorder<S> {
     fn drop(&mut self) {
-        todo!()
+        if let Err(error) = self.engine.shutdown() {
+            log::warn!("closing the recorder on drop failed: {error}");
+        }
     }
 }
 
@@ -187,19 +208,21 @@ pub struct StartError<S> {
 /// For callers that do not need the sink back: `?` drops it.
 impl<S> From<StartError<S>> for Error {
     fn from(e: StartError<S>) -> Error {
-        todo!()
+        e.error
     }
 }
 
 impl<S> fmt::Debug for StartError<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
+        f.debug_struct("StartError")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
     }
 }
 
 impl<S> fmt::Display for StartError<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
+        write!(f, "cannot start recording: {}", self.error)
     }
 }
 
@@ -224,7 +247,7 @@ impl<S> Stopped<S> {
     /// `StopCalled` and no dropped frames. The library never presents an
     /// incomplete recording as complete.
     pub fn is_complete(&self) -> bool {
-        todo!()
+        matches!(self.end_reason, EndReason::StopCalled) && self.dropped_frames == 0
     }
 }
 

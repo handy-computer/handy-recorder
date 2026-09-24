@@ -27,7 +27,12 @@ impl RecorderConfig {
     /// Speech capture: 16 kHz, mixed to mono, 480-frame (30 ms) chunks, from
     /// the system default device.
     pub fn speech() -> Self {
-        todo!()
+        Self {
+            device: None,
+            sample_rate: Some(16_000),
+            channels: Channels::MixToMono,
+            frames_per_chunk: Some(480),
+        }
     }
 }
 

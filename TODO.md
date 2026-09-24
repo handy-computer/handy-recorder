@@ -64,3 +64,102 @@ that, plus zero padding. Review that this intentional change (the
 design's "final-chunk zero padding") is acceptable for Handy.
 
 Location: `capture/resampler.rs`, `drain_tail`.
+
+### Format limits
+
+`open` rejects an output `sample_rate` outside 1 kHz..=768 kHz and a
+`frames_per_chunk` of 0 or longer than 10 s, as `UnsupportedFormat`. Any
+rate pair Rubato's FFT resampler accepts is otherwise allowed; a pair with
+a small common divisor (48000 -> 44101 Hz) makes Rubato use very large
+FFTs. A device whose native sample format is not u8/i8/i16/i32/f32 (for
+example 24-bit packed) fails `open` with `Backend`, as in Handy.
+
+Location: `capture/engine.rs` (`MIN_OUTPUT_RATE`, `MAX_OUTPUT_RATE`,
+`MAX_CHUNK_SECONDS`).
+
+### Watchdog false positives
+
+The watchdog fails the recorder with `NoAudio` (no callback within 10 s of
+open), `Stalled` (no callback for 5 s after audio started), or
+`SinkStalled` (delivery thread made no progress for 10 s). The known
+risks from the design are untested on hardware: system sleep and wake,
+a process paused in a debugger, a Bluetooth device slower than 10 s to
+start, and a sink whose first call is slow (a VAD model warming up counts
+against the 10 s heartbeat). Every trip is logged at `warn` with what it
+measured. Values are in the `REVIEW(timeouts)` list.
+
+Location: `capture/engine.rs`, `Watchdog`.
+
+### Allocation in the error callback
+
+For errors that end the stream, the CPAL adapter formats the platform
+message into a `String` and sends it over a channel from the error
+callback, which may run on the audio thread. This happens at most a few
+times per recorder (the first fatal error fails it), and survivable
+errors (xruns) never allocate. Review whether fatal errors need a
+preallocated slot instead.
+
+Location: `backend/cpal.rs` (`map_error`), `capture/engine.rs` (`open_stream`).
+
+### Untested paths
+
+- `Processing` failures: the fake backend cannot make Rubato fail, so the
+  path from a resampler error to a failed recorder is covered only by
+  reading. A test hook that injects a resampler error would cover it.
+- Real hardware: device loss, stream invalidation, and the watchdog have
+  only run against the fake. The tier-3 probes (`tools/probe/`) are not
+  written yet.
+- Windows and Linux compile (Linux type-checked with a stub `alsa.pc`)
+  but have not run. Tier-2 virtual-device tests (PulseAudio and
+  pipewire-pulse null sources) are not written; they need a Linux machine
+  or CI.
+
+### PulseAudio server restarts
+
+The CPAL backend keeps one `cpal::Host` for the process (the PulseAudio
+host holds a server connection; DESIGN.md asks for one host per process).
+If the sound server restarts, that connection is dead and every later
+`list_input_devices` and `open` fails until the process restarts. The
+backend should recreate the host when an operation fails with a
+host-unavailable error.
+
+Location: `backend/cpal.rs`, `CpalBackend::shared`.
+
+### Default device without an ID
+
+If the platform returns a default device with no ID, `open` reports it
+with an empty `id` (and `id_is_stable: false`). It still opens; the ID
+cannot be used to reopen it. Not seen on macOS.
+
+Location: `backend/cpal.rs`, `open_device`.
+
+## Changes from Handy to confirm
+
+- Handy's two `needs_reopen` tests were removed with the rebuild-on-error
+  model they tested. Their replacement is the failure tests
+  (`tests/failures.rs`): a failed recorder stays failed.
+- Handy's consumer-loop tests were migrated to the recorder: idle audio
+  discarded, repeated start/stop without leaks, shutdown without audio,
+  chunk size, and the missing-callback-at-stop test (now `Stalled`). See
+  `tests/lifecycle.rs`, `tests/failures.rs`, `tests/formats.rs`.
+- Handy's own start/stop test raced Start against the consumer's drain
+  (it could discard the first block as idle audio). The library's tests
+  wait until a start is applied instead. The start edge itself is still
+  inexact by design (DESIGN.md, "Recording boundaries").
+- An out-of-range `Channels::Only` is `InvalidChannel` from `open`; Handy
+  fell back to averaging. Handy's adapter implements its own fallback,
+  using `InputDevice::channels`.
+- `examples/push_to_talk.rs` did not exit on Ctrl-D (its own event sender
+  kept the channel open); it now quits on end of input.
+
+## Not started
+
+- The phase-2 exit criterion: a Handy branch using this crate as a path
+  dependency, with Handy's sink (VAD, collection, streaming forward)
+  passing Handy's audio tests. It is in another repository.
+- The permission-request prototype (provisional in DESIGN.md): needs a
+  bundled macOS app, a terminal-hosted Node process, and an unbundled CLI.
+- `list_input_devices` does not filter PulseAudio "Monitor of ..." sources
+  (an open decision in DESIGN.md).
+- A README, including the macOS < 14.2 weak-link flag
+  (`-C link-arg=-Wl,-weak_framework,CoreAudio`) DESIGN.md asks for.

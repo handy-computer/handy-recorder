@@ -11,7 +11,10 @@ use crate::InputDevice;
 /// "AirPods Pro (CoreAudio) disconnected 12.4 s into the stream:
 /// kAudioHardwareBadDeviceError".
 #[derive(Debug, Clone)]
-pub struct Error {
+pub struct Error(Box<Inner>);
+
+#[derive(Debug, Clone)]
+struct Inner {
     kind: ErrorKind,
     device: Option<InputDevice>,
     elapsed: Option<Duration>,
@@ -21,31 +24,72 @@ pub struct Error {
 impl Error {
     /// What happened. The part applications match on.
     pub fn kind(&self) -> ErrorKind {
-        todo!()
+        self.0.kind
     }
 
     /// The device involved, if one had been resolved.
     pub fn device(&self) -> Option<&InputDevice> {
-        todo!()
+        self.0.device.as_ref()
     }
 
     /// How long the stream had been running when this happened. `None` for
     /// failures before the stream started (during `open`) and for errors
     /// that are not about the stream (`AlreadyRecording`, `NotRecording`).
     pub fn elapsed(&self) -> Option<Duration> {
-        todo!()
+        self.0.elapsed
     }
 
     /// The platform's own message, verbatim (a CoreAudio status, a WASAPI
     /// HRESULT, an ALSA error), or which requested setting was unsupported.
     pub fn detail(&self) -> Option<&str> {
-        todo!()
+        self.0.detail.as_deref()
+    }
+
+    pub(crate) fn new(kind: ErrorKind) -> Self {
+        Self(Box::new(Inner {
+            kind,
+            device: None,
+            elapsed: None,
+            detail: None,
+        }))
+    }
+
+    pub(crate) fn with_device(mut self, device: InputDevice) -> Self {
+        self.0.device = Some(device);
+        self
+    }
+
+    pub(crate) fn with_elapsed(mut self, elapsed: Duration) -> Self {
+        self.0.elapsed = Some(elapsed);
+        self
+    }
+
+    pub(crate) fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.0.detail = Some(detail.into());
+        self
     }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
+        // Name the device first when the error is about it. Sink, library,
+        // and misuse errors are not, so they read without it.
+        let device = self
+            .0
+            .device
+            .as_ref()
+            .filter(|_| self.0.kind.is_about_device());
+        if let Some(device) = device {
+            write!(f, "{} ({}) ", device.name, device.backend)?;
+        }
+        f.write_str(self.0.kind.describe(device.is_some()))?;
+        if let Some(elapsed) = self.0.elapsed {
+            write!(f, " {:.1} s into the stream", elapsed.as_secs_f64())?;
+        }
+        if let Some(detail) = &self.0.detail {
+            write!(f, ": {detail}")?;
+        }
+        Ok(())
     }
 }
 
@@ -99,4 +143,48 @@ pub enum ErrorKind {
     NotRecording,
     /// The platform did not finish tearing the stream down in time.
     CloseTimedOut,
+}
+
+impl ErrorKind {
+    fn is_about_device(self) -> bool {
+        !matches!(
+            self,
+            Self::SinkStalled | Self::Processing | Self::AlreadyRecording | Self::NotRecording
+        )
+    }
+
+    /// The phrase `Display` uses, written to follow the device's name when
+    /// there is one ("AirPods Pro (CoreAudio) disconnected").
+    fn describe(self, after_device: bool) -> &'static str {
+        match (self, after_device) {
+            (Self::DeviceUnavailable, true) => "is not available",
+            (Self::DeviceUnavailable, false) => "no input device is available",
+            (Self::DeviceBusy, true) => "is in use by another application",
+            (Self::DeviceBusy, false) => "the input device is in use by another application",
+            (Self::PermissionDenied, true) => "access was denied",
+            (Self::PermissionDenied, false) => "microphone access was denied",
+            (Self::UnsupportedFormat, true) => "cannot deliver the requested format",
+            (Self::UnsupportedFormat, false) => "the requested format is not supported",
+            (Self::InvalidChannel, true) => "has no such channel",
+            (Self::InvalidChannel, false) => "the requested channel does not exist",
+            (Self::OpenTimedOut, true) => "did not finish opening in time",
+            (Self::OpenTimedOut, false) => "the input device did not finish opening in time",
+            (Self::NoAudio, true) => "never delivered audio",
+            (Self::NoAudio, false) => "the input device never delivered audio",
+            (Self::DeviceLost, true) => "disconnected",
+            (Self::DeviceLost, false) => "the input device disconnected",
+            (Self::StreamInvalidated, true) => "stream was invalidated",
+            (Self::StreamInvalidated, false) => "the input stream was invalidated",
+            (Self::Stalled, true) => "stopped delivering audio",
+            (Self::Stalled, false) => "the input device stopped delivering audio",
+            (Self::SinkStalled, _) => "the sink stopped returning",
+            (Self::Backend, true) => "reported an error",
+            (Self::Backend, false) => "the audio backend reported an error",
+            (Self::Processing, _) => "audio processing failed (a bug in handy-recorder)",
+            (Self::AlreadyRecording, _) => "a recording is already active",
+            (Self::NotRecording, _) => "there is no recording to stop",
+            (Self::CloseTimedOut, true) => "did not finish closing in time",
+            (Self::CloseTimedOut, false) => "the input device did not finish closing in time",
+        }
+    }
 }

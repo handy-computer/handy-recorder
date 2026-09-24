@@ -40,17 +40,18 @@ pub struct CollectingSink {
 
 impl CollectingSink {
     pub fn new() -> Self {
-        todo!()
+        Self::default()
     }
 
     /// The collected interleaved samples.
     pub fn into_samples(self) -> Vec<f32> {
-        todo!()
+        self.samples
     }
 }
 
 impl Sink for CollectingSink {
     fn process_chunk(&mut self, chunk: AudioChunk<'_>) {
-        todo!()
+        let real = chunk.valid_frames * chunk.channels as usize;
+        self.samples.extend_from_slice(&chunk.samples[..real]);
     }
 }

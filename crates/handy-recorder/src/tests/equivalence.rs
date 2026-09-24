@@ -12,18 +12,18 @@
 //! When the pipeline's shape changes (fake backend, sinks and chunks), only
 //! the extracted side of this file changes; the reference never does.
 
-use std::{
-    sync::{Arc, atomic::Ordering},
-    thread,
-    time::{Duration, Instant},
-};
+use std::{sync::atomic::Ordering, time::Duration};
 
 use dasp_sample::{FromSample, Sample};
 use rtrb::RingBuffer;
 
-use super::{AudioRecorder, OUTPUT_SAMPLE_RATE};
-use crate::backend::{DeviceFormat, InputSample, fake::FakeBackend};
+use super::support::{self, Chunks};
+use crate::backend::InputSample;
 use crate::capture::handy_reference as handy;
+use crate::{Channels, Recorder, RecorderConfig};
+
+/// Handy's output rate.
+const OUTPUT_SAMPLE_RATE: u32 = 16_000;
 
 /// Frames per callback block, cycled. Includes single-frame blocks and sizes
 /// on both sides of the resampler's 1024-sample chunk.
@@ -31,17 +31,10 @@ const BLOCK_FRAMES: &[usize] = &[1, 7, 480, 1024, 3, 2048, 441, 1, 1, 1500];
 
 const RATES: &[u32] = &[8_000, 16_000, 44_100, 48_000, 96_000];
 
-/// (device channels, selected channel). `None` averages all channels, and so
-/// does an out-of-range channel (Handy's fallback).
-const ROUTINGS: &[(usize, Option<usize>)] = &[
-    (1, None),
-    (2, None),
-    (2, Some(1)),
-    (4, Some(3)),
-    (2, Some(5)),
-];
-
-const TIMEOUT: Duration = Duration::from_secs(5);
+/// (device channels, selected channel). `None` averages all channels.
+/// Handy's fallback for an out-of-range channel is gone: it is
+/// `InvalidChannel` from `open` (see `formats.rs`).
+const ROUTINGS: &[(usize, Option<usize>)] = &[(1, None), (2, None), (2, Some(1)), (4, Some(3))];
 
 /// One interleaved callback block.
 type Block<T> = Vec<T>;
@@ -154,16 +147,8 @@ where
         .collect()
 }
 
-fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
-    let deadline = Instant::now() + TIMEOUT;
-    while !condition() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        thread::sleep(Duration::from_micros(200));
-    }
-}
-
-/// The extracted pipeline, opened on the fake backend and driven the way a
-/// device drives it.
+/// The library, opened on the fake backend through the public API and
+/// driven the way a device drives it.
 fn run_extracted<T>(
     stream: &Stream<T>,
     rate: u32,
@@ -174,54 +159,36 @@ fn run_extracted<T>(
 where
     T: InputSample,
 {
-    let fake = FakeBackend::new(DeviceFormat {
-        sample_rate: rate,
-        channels: channels as u16,
-        sample_format: T::FORMAT,
-    });
-    let mut recorder = AudioRecorder::with_backend(Arc::new(fake.clone()))
-        .with_frame_samples(frame_samples)
-        .with_selected_channel(use_channel.map(|c| c as u16));
-    recorder.open(None).expect("open fake device");
-    let transport = Arc::clone(recorder.transport.as_ref().unwrap());
+    let fake = support::fake_with(rate, channels as u16, T::FORMAT);
+    let config = RecorderConfig {
+        device: None,
+        sample_rate: Some(OUTPUT_SAMPLE_RATE),
+        channels: match use_channel {
+            Some(channel) => Channels::Only(channel as u16),
+            None => Channels::MixToMono,
+        },
+        frames_per_chunk: Some(frame_samples),
+    };
+    let recorder: Recorder<Chunks> = support::open(&fake, config);
 
     let mut outputs = Vec::new();
-    // Samples the consumer had drained when the ring was last empty.
-    let mut drained_when_empty = 0;
-    for (index, (idle, blocks)) in stream.idle.iter().zip(&stream.recordings).enumerate() {
+    for (idle, blocks) in stream.idle.iter().zip(&stream.recordings) {
         // Idle audio is discarded. Wait until it is drained, so none of it is
         // still in the ring when the recording starts.
-        let idle_frames: usize = idle.iter().map(|block| block.len() / channels).sum();
         for block in idle {
-            assert!(fake.push(block));
+            support::push_idle(&recorder, &fake, block);
         }
-        wait_until("idle audio drained", || {
-            transport.frames_drained.load(Ordering::Acquire) == drained_when_empty + idle_frames
-        });
-
-        let _ready = recorder.start().expect("start");
-        wait_until("start applied", || {
-            transport.starts_applied.load(Ordering::Acquire) == index + 1
-        });
+        support::start(&recorder, Chunks::default());
 
         let (boundary, before_stop) = blocks.split_last().expect("recording has blocks");
         for block in before_stop {
             assert!(fake.push(block));
         }
-
         // The first callback after the stop request is the boundary block;
         // it belongs to the recording.
-        let output = thread::scope(|scope| {
-            let stopping = scope.spawn(|| recorder.stop().expect("stop"));
-            wait_until("pause requested", || {
-                transport.pause_requested.load(Ordering::Acquire)
-            });
-            assert!(fake.push(boundary));
-            stopping.join().unwrap()
-        });
-        outputs.push(output);
-        // A stop drains the ring completely.
-        drained_when_empty = transport.frames_drained.load(Ordering::Acquire);
+        let stopped = support::stop_with_boundary(&recorder, &fake, boundary).expect("stop");
+        assert!(stopped.is_complete(), "{:?}", stopped.end_reason);
+        outputs.push(stopped.sink.all());
     }
 
     recorder.close().expect("close");
@@ -292,10 +259,7 @@ where
         let frame_samples = if case % 2 == 0 { 480 } else { 512 };
         let stream = make_stream::<T>(rate, channels);
 
-        // Handy resolves an out-of-range channel to averaging when it builds
-        // the stream; its callback only ever sees the resolved channel.
-        let resolved = use_channel.filter(|&c| c < channels);
-        let expected = run_reference(&stream, rate, channels, resolved, frame_samples);
+        let expected = run_reference(&stream, rate, channels, use_channel, frame_samples);
         let actual = run_extracted(&stream, rate, channels, use_channel, frame_samples);
 
         assert_eq!(expected.len(), actual.len());

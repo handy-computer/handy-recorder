@@ -84,6 +84,7 @@ pub(crate) enum InputData<'a> {
 /// what Handy used through `cpal::Sample`; the equivalence test holds it to
 /// that bit for bit.
 pub(crate) trait InputSample: Copy + Send + 'static {
+    #[cfg_attr(not(test), allow(dead_code))]
     const FORMAT: SampleFormat;
     fn to_f32(self) -> f32;
     fn wrap(data: &[Self]) -> InputData<'_>;

@@ -39,6 +39,7 @@ impl CpalBackend {
     /// The process-wide backend. Sharing it also shares Handy's
     /// preferred-config cache across recorders, so reopening a device skips
     /// the HAL queries.
+    // TODO(review): see TODO.md, "PulseAudio server restarts".
     pub fn shared() -> Arc<Self> {
         static SHARED: OnceLock<Arc<CpalBackend>> = OnceLock::new();
         Arc::clone(SHARED.get_or_init(|| Arc::new(Self::new())))
@@ -169,6 +170,7 @@ impl Backend for CpalBackend {
                     })
                     .map(|(info, _)| info)
                     .unwrap_or_else(|| InputDevice {
+                        // TODO(review): see TODO.md, "Default device without an ID".
                         id: id.as_ref().map_or_else(String::new, ToString::to_string),
                         name: device_name(&device),
                         occurrence: 0,
@@ -342,6 +344,7 @@ fn map_error_during(step: &str, e: cpal::Error) -> BackendError {
     BackendError::new(map_kind(e.kind()), format!("{step}: {e}"))
 }
 
+// TODO(review): see TODO.md, "Allocation in the error callback".
 fn map_error(e: cpal::Error) -> BackendError {
     let kind = map_kind(e.kind());
     if kind.stream_survives() {

@@ -2,7 +2,7 @@
 //! audio thread: [`FakeBackend::push`] calls the running stream's data
 //! callback directly, so a test decides exactly when every block arrives.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use super::{
     Backend, BackendError, BackendErrorKind, DataCallback, DeviceFormat, ErrorCallback,
@@ -29,6 +29,28 @@ struct State {
     stream: Option<(DataCallback, ErrorCallback)>,
     next_open_error: Option<BackendError>,
     streams_started: usize,
+    /// Makes the next `start` hang until the gate opens.
+    start_gate: Option<Gate>,
+    /// Makes stream teardown hang until the gate opens.
+    teardown_gate: Option<Gate>,
+}
+
+/// Holds a platform call until opened, like a driver that hangs.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Gate(Arc<(Mutex<bool>, Condvar)>);
+
+impl Gate {
+    pub fn open(&self) {
+        *self.0.0.lock().unwrap() = true;
+        self.0.1.notify_all();
+    }
+
+    pub fn wait(&self) {
+        let mut open = self.0.0.lock().unwrap();
+        while !*open {
+            open = self.0.1.wait(open).unwrap();
+        }
+    }
 }
 
 impl FakeBackend {
@@ -79,6 +101,20 @@ impl FakeBackend {
         self.shared.state.lock().unwrap().next_open_error = Some(error);
     }
 
+    /// Makes the next stream start hang until the returned gate opens.
+    pub fn hang_next_start(&self) -> Gate {
+        let gate = Gate::default();
+        self.shared.state.lock().unwrap().start_gate = Some(gate.clone());
+        gate
+    }
+
+    /// Makes stream teardown hang until the returned gate opens.
+    pub fn hang_teardown(&self) -> Gate {
+        let gate = Gate::default();
+        self.shared.state.lock().unwrap().teardown_gate = Some(gate.clone());
+        gate
+    }
+
     pub fn is_streaming(&self) -> bool {
         self.shared.state.lock().unwrap().stream.is_some()
     }
@@ -123,6 +159,10 @@ impl OpenDevice for FakeOpenDevice {
         data: DataCallback,
         error: ErrorCallback,
     ) -> Result<Box<dyn InputStream>, BackendError> {
+        let gate = self.0.shared.state.lock().unwrap().start_gate.take();
+        if let Some(gate) = gate {
+            gate.wait();
+        }
         let mut state = self.0.shared.state.lock().unwrap();
         assert!(state.stream.is_none(), "the fake runs one stream at a time");
         state.stream = Some((data, error));
@@ -138,6 +178,10 @@ impl InputStream for FakeStream {}
 
 impl Drop for FakeStream {
     fn drop(&mut self) {
+        let gate = self.0.shared.state.lock().unwrap().teardown_gate.take();
+        if let Some(gate) = gate {
+            gate.wait();
+        }
         self.0.shared.state.lock().unwrap().stream = None;
     }
 }

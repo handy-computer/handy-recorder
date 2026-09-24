@@ -1,48 +1,50 @@
-//! Capture code extracted from Handy (`src-tauri/src/audio_toolkit/audio/`,
-//! commit 8f9cf53c): the real-time callback, the ring transport, stream
-//! construction, the pause handshake, the consumer loop, and the resampler.
+//! The capture engine. Its real-time path, pause handshake, consumer loop,
+//! and resampler come from Handy (`src-tauri/src/audio_toolkit/audio/` at
+//! commit 8f9cf53c); `handy_reference.rs` is a frozen copy the equivalence
+//! test holds them to. What changed and why is in DESIGN.md ("Extraction
+//! from Handy", "Regression strategy") and TODO.md.
 //!
-//! Kept close to Handy's source so it can be diffed against it. Removed: VAD,
-//! the level visualizer, and Tauri wiring, which stay in Handy. Platform
-//! access (device selection, preferred format, CPAL stream construction)
-//! moved behind the backend seam in `crate::backend`. Handy's behavior is otherwise unchanged,
-//! including the parts the design replaces later (see DESIGN.md, "Extraction
-//! from Handy").
+//! - `transport`: the real-time callback and the atomics it shares.
+//! - `delivery`: the delivery thread (Handy's consumer loop) and the sink.
+//! - `engine`: the device thread, watchdog, and start/stop/close.
+//! - `resampler`: K-channel resampling and exact chunking.
 
+pub(crate) mod delivery;
+pub(crate) mod engine;
+// Frozen: never edited, never reformatted.
 #[cfg(test)]
-mod handy_reference;
-mod recorder;
+#[rustfmt::skip]
+pub(crate) mod handy_reference;
 mod resampler;
+pub(crate) mod transport;
 
-#[allow(unused_imports)]
-pub(crate) use recorder::{AudioRecorder, is_microphone_access_denied, is_no_input_device_error};
 pub(crate) use resampler::FrameResampler;
 
 #[cfg(test)]
 mod smoke {
     use std::time::Duration;
 
-    use super::AudioRecorder;
+    use crate::{CollectingSink, Recorder, RecorderConfig};
 
-    /// Real hardware: records one second from the default microphone through
-    /// the extracted CPAL path. Run with `cargo test -- --ignored`.
+    /// Real hardware: records one second of speech-format audio from the
+    /// default microphone. Run with `cargo test -- --ignored`.
     #[test]
     #[ignore = "needs a microphone"]
     fn records_one_second_from_the_default_microphone() {
-        let mut recorder = AudioRecorder::new().expect("recorder");
-        recorder.open(None).expect("open default microphone");
-        let ready = recorder.start().expect("start");
-        ready
-            .recv_timeout(Duration::from_secs(5))
-            .expect("first audio within 5 s");
+        let recorder: Recorder<CollectingSink> =
+            Recorder::open(RecorderConfig::speech()).expect("open default microphone");
+        eprintln!("recording from {:?}", recorder.info());
+        recorder.start(CollectingSink::new()).expect("start");
         std::thread::sleep(Duration::from_secs(1));
-        let samples = recorder.stop().expect("stop");
+        let stopped = recorder.stop().expect("stop");
         recorder.close().expect("close");
 
+        assert!(stopped.is_complete(), "{:?}", stopped.end_reason);
+        let samples = stopped.sink.into_samples();
         let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
         eprintln!("captured {} samples at 16 kHz, peak {peak}", samples.len());
-        // About one second after first audio, whole 480-sample frames.
-        assert!(samples.len() >= 15_000, "only {} samples", samples.len());
-        assert_eq!(samples.len() % 480, 0);
+        // About one second; the start edge includes up to one poll interval
+        // of audio from before start, and a Bluetooth device may start late.
+        assert!(samples.len() >= 12_000, "only {} samples", samples.len());
     }
 }
