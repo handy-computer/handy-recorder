@@ -1,6 +1,6 @@
 use super::{
     is_microphone_access_denied, is_no_input_device_error, run_consumer, AudioRecorder,
-    CaptureProcessor, CaptureTransportState, ChunkDisposition, Cmd, DEFAULT_FRAME_SAMPLES,
+    CaptureProcessor, CaptureTransportState, ChunkDisposition, Cmd, Routing, DEFAULT_FRAME_SAMPLES,
 };
 use rtrb::RingBuffer;
 use std::{
@@ -84,7 +84,7 @@ fn callback_writes_mono_samples() {
     let (mut producer, mut consumer) = RingBuffer::<f32>::new(8);
     let transport = CaptureTransportState::default();
 
-    AudioRecorder::write_input_to_ring(&[0.25f32, -0.5, 1.0], 1, None, &mut producer, &transport);
+    AudioRecorder::write_input_to_ring(&[0.25f32, -0.5, 1.0], 1, Routing::MixToMono, &mut producer, &transport);
 
     let mut output = [0.0; 3];
     consumer.pop_entire_slice(&mut output).expect("samples");
@@ -98,7 +98,7 @@ fn callback_downmixes_or_selects_multichannel_input() {
     AudioRecorder::write_input_to_ring(
         &[1.0f32, 3.0, -1.0, 1.0],
         2,
-        None,
+        Routing::MixToMono,
         &mut average_tx,
         &transport,
     );
@@ -112,7 +112,7 @@ fn callback_downmixes_or_selects_multichannel_input() {
     AudioRecorder::write_input_to_ring(
         &[1.0f32, 3.0, -1.0, 1.0],
         2,
-        Some(1),
+        Routing::Only(1),
         &mut selected_tx,
         &transport,
     );
@@ -131,19 +131,19 @@ fn callback_forwards_boundary_block_then_stays_silent_until_resumed() {
     // The block in hand when a pause is first observed was captured before
     // the stop, so it is forwarded and only then acknowledged.
     transport.pause_requested.store(true, Ordering::Release);
-    AudioRecorder::write_input_to_ring(&[1.0f32, 2.0], 1, None, &mut producer, &transport);
+    AudioRecorder::write_input_to_ring(&[1.0f32, 2.0], 1, Routing::MixToMono, &mut producer, &transport);
     assert!(transport.pause_acknowledged.load(Ordering::Acquire));
     assert_eq!(consumer.slots(), 2);
 
     // Later blocks while paused are dropped and are not counted as overruns.
-    AudioRecorder::write_input_to_ring(&[3.0f32], 1, None, &mut producer, &transport);
+    AudioRecorder::write_input_to_ring(&[3.0f32], 1, Routing::MixToMono, &mut producer, &transport);
     assert_eq!(consumer.slots(), 2);
     assert_eq!(transport.overrun_samples.load(Ordering::Relaxed), 0);
 
     // Clearing the pause, as the consumer does before stop() returns, resumes capture.
     transport.pause_acknowledged.store(false, Ordering::Relaxed);
     transport.pause_requested.store(false, Ordering::Release);
-    AudioRecorder::write_input_to_ring(&[4.0f32], 1, None, &mut producer, &transport);
+    AudioRecorder::write_input_to_ring(&[4.0f32], 1, Routing::MixToMono, &mut producer, &transport);
     let mut output = [0.0; 3];
     consumer.pop_entire_slice(&mut output).expect("samples");
     assert_eq!(output, [1.0, 2.0, 4.0]);
@@ -155,7 +155,7 @@ fn callback_partially_fills_ring_and_counts_dropped_audio() {
     let (mut producer, mut consumer) = RingBuffer::<f32>::new(2);
     let transport = CaptureTransportState::default();
 
-    AudioRecorder::write_input_to_ring(&[1.0f32, 2.0, 3.0], 1, None, &mut producer, &transport);
+    AudioRecorder::write_input_to_ring(&[1.0f32, 2.0, 3.0], 1, Routing::MixToMono, &mut producer, &transport);
 
     let mut captured = [0.0; 2];
     consumer
@@ -195,8 +195,7 @@ fn ring_wraparound_preserves_both_read_slices_in_order() {
 
     AudioRecorder::write_input_to_ring(
         &[5.0f32, 6.0, 7.0, 8.0],
-        1,
-        None,
+        1, Routing::MixToMono,
         &mut producer,
         &transport,
     );
@@ -252,7 +251,7 @@ fn repeated_start_stop_cycles_resume_capture_without_leaking_samples() {
     cmd_tx
         .send(Cmd::Start(Instant::now(), ready_tx))
         .expect("first start");
-    AudioRecorder::write_input_to_ring(&first_input, 1, None, &mut producer, &transport);
+    AudioRecorder::write_input_to_ring(&first_input, 1, Routing::MixToMono, &mut producer, &transport);
     ready_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("first capture ready");
@@ -262,7 +261,7 @@ fn repeated_start_stop_cycles_resume_capture_without_leaking_samples() {
     wait_for_pause_request();
     // The first callback after Stop carries audio captured before the stop,
     // so it belongs to the recording.
-    AudioRecorder::write_input_to_ring(&[99.0f32], 1, None, &mut producer, &transport);
+    AudioRecorder::write_input_to_ring(&[99.0f32], 1, Routing::MixToMono, &mut producer, &transport);
 
     let first_samples = reply_rx
         .recv_timeout(Duration::from_secs(1))
@@ -287,7 +286,7 @@ fn repeated_start_stop_cycles_resume_capture_without_leaking_samples() {
     cmd_tx
         .send(Cmd::Start(Instant::now(), ready_tx))
         .expect("second start");
-    AudioRecorder::write_input_to_ring(&second_input, 1, None, &mut producer, &transport);
+    AudioRecorder::write_input_to_ring(&second_input, 1, Routing::MixToMono, &mut producer, &transport);
     ready_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("second capture ready");
@@ -295,7 +294,7 @@ fn repeated_start_stop_cycles_resume_capture_without_leaking_samples() {
     let (reply_tx, reply_rx) = mpsc::channel();
     cmd_tx.send(Cmd::Stop(reply_tx)).expect("second stop");
     wait_for_pause_request();
-    AudioRecorder::write_input_to_ring(&[199.0f32], 1, None, &mut producer, &transport);
+    AudioRecorder::write_input_to_ring(&[199.0f32], 1, Routing::MixToMono, &mut producer, &transport);
 
     let second_samples = reply_rx
         .recv_timeout(Duration::from_secs(1))
@@ -395,4 +394,80 @@ fn detects_coreaudio_config_error() {
 fn does_not_match_other_errors_for_no_device() {
     assert!(!is_no_input_device_error("permission denied"));
     assert!(!is_no_input_device_error("device not found"));
+}
+
+// ---- K-channel ring (new in the library; Handy is mono-only) ------------- //
+
+#[test]
+fn callback_writes_all_channels_interleaved() {
+    let (mut producer, mut consumer) = RingBuffer::<f32>::new(8);
+    let transport = CaptureTransportState::default();
+
+    AudioRecorder::write_input_to_ring(
+        &[1.0f32, -1.0, 2.0, -2.0, 3.0, -3.0],
+        2,
+        Routing::All,
+        &mut producer,
+        &transport,
+    );
+
+    let mut output = [0.0; 6];
+    consumer.pop_entire_slice(&mut output).expect("samples");
+    assert_eq!(output, [1.0, -1.0, 2.0, -2.0, 3.0, -3.0]);
+}
+
+#[test]
+fn overrun_drops_whole_frames_and_counts_frames() {
+    // Five free slots hold two stereo frames; the fifth slot stays empty
+    // rather than taking half of the third frame.
+    let (mut producer, mut consumer) = RingBuffer::<f32>::new(5);
+    let transport = CaptureTransportState::default();
+
+    AudioRecorder::write_input_to_ring(
+        &[1.0f32, -1.0, 2.0, -2.0, 3.0, -3.0],
+        2,
+        Routing::All,
+        &mut producer,
+        &transport,
+    );
+
+    assert_eq!(consumer.slots(), 4);
+    let mut output = [0.0; 4];
+    consumer.pop_entire_slice(&mut output).expect("samples");
+    assert_eq!(output, [1.0, -1.0, 2.0, -2.0]);
+    assert_eq!(transport.overrun_samples.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn stereo_frames_stay_aligned_across_ring_wraparound() {
+    // Capacity is a multiple of K (as the engine allocates it), so a frame
+    // never straddles the wrap point unevenly.
+    let (mut producer, mut consumer) = RingBuffer::<f32>::new(6);
+    let transport = CaptureTransportState::default();
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+
+    for block in 0..10 {
+        let base = block as f32 * 10.0;
+        AudioRecorder::write_input_to_ring(
+            &[base + 1.0, -(base + 1.0), base + 2.0, -(base + 2.0)],
+            2,
+            Routing::All,
+            &mut producer,
+            &transport,
+        );
+        let chunk = consumer.read_chunk(consumer.slots()).unwrap();
+        let (first, second) = chunk.as_slices();
+        let samples: Vec<f32> = first.iter().chain(second).copied().collect();
+        chunk.commit_all();
+        for frame in samples.chunks_exact(2) {
+            left.push(frame[0]);
+            right.push(frame[1]);
+        }
+    }
+
+    assert_eq!(transport.overrun_samples.load(Ordering::Relaxed), 0);
+    assert!(left.iter().all(|&s| s > 0.0), "left channel rotated: {left:?}");
+    assert_eq!(left, right.iter().map(|s| -s).collect::<Vec<_>>());
+    assert_eq!(left.len(), 20);
 }

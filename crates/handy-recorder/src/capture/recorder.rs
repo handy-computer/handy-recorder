@@ -338,17 +338,20 @@ impl AudioRecorder {
 
         // Resolve the effective channel to use. If the selected channel is
         // out of range for this device, fall back to averaging all channels.
-        let use_channel = selected_channel.filter(|&channel| channel < channels);
+        let routing = match selected_channel.filter(|&channel| channel < channels) {
+            Some(channel) => Routing::Only(channel),
+            None => Routing::MixToMono,
+        };
         let callback_transport = Arc::clone(&transport);
         let write = move |data: InputData<'_>| {
             let producer = &mut sample_producer;
             let transport = &callback_transport;
             match data {
-                InputData::U8(d) => Self::write_input_to_ring(d, channels, use_channel, producer, transport),
-                InputData::I8(d) => Self::write_input_to_ring(d, channels, use_channel, producer, transport),
-                InputData::I16(d) => Self::write_input_to_ring(d, channels, use_channel, producer, transport),
-                InputData::I32(d) => Self::write_input_to_ring(d, channels, use_channel, producer, transport),
-                InputData::F32(d) => Self::write_input_to_ring(d, channels, use_channel, producer, transport),
+                InputData::U8(d) => Self::write_input_to_ring(d, channels, routing, producer, transport),
+                InputData::I8(d) => Self::write_input_to_ring(d, channels, routing, producer, transport),
+                InputData::I16(d) => Self::write_input_to_ring(d, channels, routing, producer, transport),
+                InputData::I32(d) => Self::write_input_to_ring(d, channels, routing, producer, transport),
+                InputData::F32(d) => Self::write_input_to_ring(d, channels, routing, producer, transport),
             }
         };
 
@@ -365,10 +368,13 @@ impl AudioRecorder {
 
     /// Real-time callback body. Keep this allocation-free, wait-free, and free
     /// of locks, logging, clocks, and system calls.
+    ///
+    /// Writes whole frames of `routing.output_channels(channels)` samples, so
+    /// on overrun it drops whole frames and never splits one across the ring.
     fn write_input_to_ring<T>(
         data: &[T],
         channels: usize,
-        use_channel: Option<usize>,
+        routing: Routing,
         producer: &mut Producer<f32>,
         transport: &CaptureTransportState,
     ) where
@@ -382,13 +388,14 @@ impl AudioRecorder {
             return;
         }
 
+        let out_channels = routing.output_channels(channels);
         let frame_count = data.len() / channels;
-        let writable_frames = producer.slots().min(frame_count);
+        let writable_frames = (producer.slots() / out_channels).min(frame_count);
         let written = if writable_frames == 0 {
             0
         } else {
             let chunk = producer
-                .write_chunk_uninit(writable_frames)
+                .write_chunk_uninit(writable_frames * out_channels)
                 .expect("the producer just reported this many writable slots");
             if channels == 1 {
                 chunk.fill_from_iter(
@@ -396,27 +403,33 @@ impl AudioRecorder {
                         .take(writable_frames)
                         .map(|&sample| sample.to_f32()),
                 )
-            } else if let Some(channel) = use_channel {
-                chunk.fill_from_iter(
-                    data.chunks_exact(channels)
-                        .take(writable_frames)
-                        .map(|frame| frame[channel].to_f32()),
-                )
             } else {
-                chunk.fill_from_iter(data.chunks_exact(channels).take(writable_frames).map(
-                    |frame| {
-                        frame
-                            .iter()
-                            .map(|&sample| sample.to_f32())
-                            .sum::<f32>()
-                            / channels as f32
-                    },
-                ))
+                match routing {
+                    Routing::Only(channel) => chunk.fill_from_iter(
+                        data.chunks_exact(channels)
+                            .take(writable_frames)
+                            .map(|frame| frame[channel].to_f32()),
+                    ),
+                    Routing::MixToMono => chunk.fill_from_iter(
+                        data.chunks_exact(channels).take(writable_frames).map(|frame| {
+                            frame
+                                .iter()
+                                .map(|&sample| sample.to_f32())
+                                .sum::<f32>()
+                                / channels as f32
+                        }),
+                    ),
+                    Routing::All => chunk.fill_from_iter(
+                        data.iter()
+                            .take(writable_frames * channels)
+                            .map(|&sample| sample.to_f32()),
+                    ),
+                }
             }
         };
-        debug_assert_eq!(written, writable_frames);
+        debug_assert_eq!(written, writable_frames * out_channels);
 
-        let dropped = frame_count - written;
+        let dropped = frame_count - writable_frames;
         if dropped > 0 {
             transport
                 .overrun_samples
@@ -426,6 +439,27 @@ impl AudioRecorder {
         // Publish the boundary write before acknowledging, including when the
         // pause request arrives during the write.
         acknowledge_pause_after_write(transport);
+    }
+}
+
+/// Which device channels reach the ring. Resolved at open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Routing {
+    /// All device channels, interleaved.
+    All,
+    /// The average of all device channels.
+    MixToMono,
+    /// One zero-based device channel, in range.
+    Only(usize),
+}
+
+impl Routing {
+    /// Samples per frame in the ring: K.
+    pub(crate) fn output_channels(self, device_channels: usize) -> usize {
+        match self {
+            Routing::All => device_channels,
+            Routing::MixToMono | Routing::Only(_) => 1,
+        }
     }
 }
 
@@ -520,13 +554,13 @@ impl CaptureProcessor {
     ) -> Self {
         // Resample into fixed-size frames so a fixed-size consumer (a VAD)
         // never sees a partial frame.
-        let frame_duration =
-            Duration::from_secs_f64(frame_samples as f64 / OUTPUT_SAMPLE_RATE as f64);
         let frame_resampler = FrameResampler::new(
             in_sample_rate as usize,
             OUTPUT_SAMPLE_RATE as usize,
-            frame_duration,
-        );
+            frame_samples,
+            1,
+        )
+        .expect("Failed to create resampler");
 
         let max_drain_samples =
             ((in_sample_rate as u128 * MAX_DRAIN_CHUNK.as_millis()) / 1_000).max(1) as usize;
@@ -587,7 +621,8 @@ impl CaptureProcessor {
             return;
         }
 
-        self.frame_resampler.push(raw, |frame: &[f32]| {
+        // Handy ignores resampler errors; the new engine fails the recorder.
+        let _ = self.frame_resampler.push(raw, |frame: &[f32], _| {
             handle_frame(frame, &self.audio_cb, &mut self.processed_samples)
         });
 
@@ -623,7 +658,7 @@ impl CaptureProcessor {
 
     /// Flush the resampler tail and hand back the finished recording.
     fn finish_recording(&mut self) -> Vec<f32> {
-        self.frame_resampler.finish(|frame: &[f32]| {
+        let _ = self.frame_resampler.finish(|frame: &[f32], _| {
             handle_frame(frame, &self.audio_cb, &mut self.processed_samples)
         });
 

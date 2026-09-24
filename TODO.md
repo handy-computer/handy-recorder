@@ -49,3 +49,18 @@ and WASAPI reports a default change on a capture stream as
 reroute should instead be survivable when the format is unchanged.
 
 Location: `backend/mod.rs`, `BackendErrorKind::DeviceChanged`.
+
+### Final chunk: synthetic resampler output
+
+When a recording ends partway through a 1024-frame resampler block, Handy
+processes the block zero-padded and emits all of its output. The part
+past the real audio is resampled padding: near-silence with ringing from
+the last real samples, and sometimes more than a whole extra chunk (1
+frame at 8 kHz gives 2048 output frames where 1026 are real). The library
+keeps only the real frames (the frame-count formula, resampler delay
+included) and zero-pads the final chunk, so `valid_frames` is exact. Real
+audio stays bit-identical to Handy; the equivalence test checks exactly
+that, plus zero padding. Review that this intentional change (the
+design's "final-chunk zero padding") is acceptable for Handy.
+
+Location: `capture/resampler.rs`, `drain_tail`.

@@ -1,6 +1,7 @@
 //! Equivalence with Handy: the same synthetic input through the frozen Handy
 //! reference (`capture::handy_reference`) and through the extracted pipeline
-//! must give bit-identical output, padding and resampler delay included.
+//! must give bit-identical real audio, resampler delay included, and the
+//! number of real frames must follow the frame-count formula.
 //!
 //! The extracted side runs end to end through the fake backend: the test
 //! thread delivers callback blocks while the recorder's consumer thread
@@ -228,14 +229,53 @@ where
     outputs
 }
 
-fn assert_bit_identical(expected: &[f32], actual: &[f32], context: &str) {
-    assert_eq!(expected.len(), actual.len(), "{context}: output length");
-    if let Some(i) = (0..expected.len()).find(|&i| expected[i].to_bits() != actual[i].to_bits()) {
+/// Frames of real audio in a recording's output: the frame-count formula,
+/// including the resampler delay Handy emits (trimming it is deferred).
+fn real_output_frames(rate: u32, input_frames: usize, frame_samples: usize) -> usize {
+    if rate == OUTPUT_SAMPLE_RATE {
+        return input_frames;
+    }
+    let delay = crate::capture::FrameResampler::new(
+        rate as usize,
+        OUTPUT_SAMPLE_RATE as usize,
+        frame_samples,
+        1,
+    )
+    .unwrap()
+    .output_delay();
+    input_frames * OUTPUT_SAMPLE_RATE as usize / rate as usize + delay
+}
+
+/// The real audio must match Handy bit for bit. After it, the library emits
+/// zero padding up to a whole chunk; Handy may instead emit resampled
+/// padding from its last partial resampler block (an intentional change:
+/// see TODO.md, "Final chunk: synthetic resampler output").
+fn assert_equivalent(
+    expected: &[f32],
+    actual: &[f32],
+    real: usize,
+    frame_samples: usize,
+    context: &str,
+) {
+    assert!(
+        expected.len() >= real,
+        "{context}: Handy emitted less than the real audio"
+    );
+    assert_eq!(
+        actual.len(),
+        real.div_ceil(frame_samples) * frame_samples,
+        "{context}: output length"
+    );
+    if let Some(i) = (0..real).find(|&i| expected[i].to_bits() != actual[i].to_bits()) {
         panic!(
             "{context}: first difference at sample {i}: Handy {} vs extracted {}",
             expected[i], actual[i]
         );
     }
+    assert!(
+        actual[real..].iter().all(|&s| s == 0.0),
+        "{context}: padding is not zeros"
+    );
 }
 
 fn check_format<T>(format: &str)
@@ -268,7 +308,12 @@ where
                 expected.iter().any(|&s| s != 0.0),
                 "{context}: reference output is silent"
             );
-            assert_bit_identical(expected, actual, &context);
+            let input_frames: usize = stream.recordings[recording]
+                .iter()
+                .map(|block| block.len() / channels)
+                .sum();
+            let real = real_output_frames(rate, input_frames, frame_samples);
+            assert_equivalent(expected, actual, real, frame_samples, &context);
         }
     }
 }
