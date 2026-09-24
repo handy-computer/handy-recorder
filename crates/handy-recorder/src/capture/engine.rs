@@ -548,8 +548,8 @@ fn permission_denied(error: Error) -> Error {
     )
 }
 
-/// Maps a platform error during open.
-fn open_error(error: BackendError, device: Option<&InputDevice>) -> Error {
+/// Maps a platform error during open, or while listing devices.
+pub(crate) fn open_error(error: BackendError, device: Option<&InputDevice>) -> Error {
     let message = error.message.to_string();
     let kind = if error.kind == BackendErrorKind::PermissionDenied
         || is_microphone_access_denied(&message)
@@ -668,9 +668,16 @@ fn open_stream(
         match data {
             InputData::U8(d) => write_input_to_ring(d, channels, routing, producer, transport),
             InputData::I8(d) => write_input_to_ring(d, channels, routing, producer, transport),
+            InputData::U16(d) => write_input_to_ring(d, channels, routing, producer, transport),
             InputData::I16(d) => write_input_to_ring(d, channels, routing, producer, transport),
+            InputData::U24(d) => write_input_to_ring(d, channels, routing, producer, transport),
+            InputData::I24(d) => write_input_to_ring(d, channels, routing, producer, transport),
+            InputData::U32(d) => write_input_to_ring(d, channels, routing, producer, transport),
             InputData::I32(d) => write_input_to_ring(d, channels, routing, producer, transport),
+            InputData::U64(d) => write_input_to_ring(d, channels, routing, producer, transport),
+            InputData::I64(d) => write_input_to_ring(d, channels, routing, producer, transport),
             InputData::F32(d) => write_input_to_ring(d, channels, routing, producer, transport),
+            InputData::F64(d) => write_input_to_ring(d, channels, routing, producer, transport),
         }
     };
     let error_shared = Arc::clone(shared);

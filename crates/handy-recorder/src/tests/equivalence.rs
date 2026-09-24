@@ -307,3 +307,38 @@ fn u8_input_matches_handy() {
 fn i8_input_matches_handy() {
     check_format::<i8>("i8");
 }
+
+#[test]
+fn u16_input_matches_handy() {
+    check_format::<u16>("u16");
+}
+
+#[test]
+fn u24_input_matches_handy() {
+    check_format::<dasp_sample::U24>("u24");
+}
+
+#[test]
+fn i24_input_matches_handy() {
+    check_format::<dasp_sample::I24>("i24");
+}
+
+#[test]
+fn f64_input_matches_handy() {
+    check_format::<f64>("f64");
+}
+
+#[test]
+fn u32_input_matches_handy() {
+    check_format::<u32>("u32");
+}
+
+#[test]
+fn u64_input_matches_handy() {
+    check_format::<u64>("u64");
+}
+
+#[test]
+fn i64_input_matches_handy() {
+    check_format::<i64>("i64");
+}

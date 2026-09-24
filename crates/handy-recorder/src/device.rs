@@ -1,5 +1,6 @@
+use crate::Error;
 use crate::backend::{Backend, cpal::CpalBackend};
-use crate::{Error, ErrorKind};
+use crate::capture::engine::open_error;
 
 /// Lists input devices.
 ///
@@ -7,7 +8,7 @@ use crate::{Error, ErrorKind};
 pub fn list_input_devices() -> Result<Vec<InputDevice>, Error> {
     CpalBackend::shared()
         .list_input_devices()
-        .map_err(|e| Error::new(ErrorKind::Backend).with_detail(e.message.into_owned()))
+        .map_err(|e| open_error(e, None))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +34,7 @@ pub struct InputDevice {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Permission {
     Granted,
     Denied,

@@ -211,9 +211,16 @@ impl Backend for CpalBackend {
         let sample_format = match config.sample_format() {
             cpal::SampleFormat::U8 => SampleFormat::U8,
             cpal::SampleFormat::I8 => SampleFormat::I8,
+            cpal::SampleFormat::U16 => SampleFormat::U16,
             cpal::SampleFormat::I16 => SampleFormat::I16,
+            cpal::SampleFormat::U24 => SampleFormat::U24,
+            cpal::SampleFormat::I24 => SampleFormat::I24,
+            cpal::SampleFormat::U32 => SampleFormat::U32,
             cpal::SampleFormat::I32 => SampleFormat::I32,
+            cpal::SampleFormat::U64 => SampleFormat::U64,
+            cpal::SampleFormat::I64 => SampleFormat::I64,
             cpal::SampleFormat::F32 => SampleFormat::F32,
+            cpal::SampleFormat::F64 => SampleFormat::F64,
             sample_format => {
                 self.clear_cache();
                 return Err(BackendError::new(
@@ -355,9 +362,20 @@ impl OpenDevice for CpalOpenDevice {
             let stream = match self.format.sample_format {
                 SampleFormat::U8 => build_stream::<u8>(&self.device, &self.config, data, error),
                 SampleFormat::I8 => build_stream::<i8>(&self.device, &self.config, data, error),
+                SampleFormat::U16 => build_stream::<u16>(&self.device, &self.config, data, error),
                 SampleFormat::I16 => build_stream::<i16>(&self.device, &self.config, data, error),
+                SampleFormat::U24 => {
+                    build_stream::<cpal::U24>(&self.device, &self.config, data, error)
+                }
+                SampleFormat::I24 => {
+                    build_stream::<cpal::I24>(&self.device, &self.config, data, error)
+                }
+                SampleFormat::U32 => build_stream::<u32>(&self.device, &self.config, data, error),
                 SampleFormat::I32 => build_stream::<i32>(&self.device, &self.config, data, error),
+                SampleFormat::U64 => build_stream::<u64>(&self.device, &self.config, data, error),
+                SampleFormat::I64 => build_stream::<i64>(&self.device, &self.config, data, error),
                 SampleFormat::F32 => build_stream::<f32>(&self.device, &self.config, data, error),
+                SampleFormat::F64 => build_stream::<f64>(&self.device, &self.config, data, error),
             }
             .map_err(|e| map_error_during("Failed to build input stream", e))?;
             let build_elapsed = build_started.elapsed();

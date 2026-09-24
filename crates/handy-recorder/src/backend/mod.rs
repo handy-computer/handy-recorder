@@ -14,7 +14,7 @@ mod headset_macos;
 
 use std::{borrow::Cow, fmt};
 
-use dasp_sample::Sample;
+use dasp_sample::{I24, Sample, U24};
 
 use crate::{InputDevice, Permission};
 
@@ -76,9 +76,16 @@ pub(crate) struct DeviceFormat {
 pub(crate) enum SampleFormat {
     U8,
     I8,
+    U16,
     I16,
+    U24,
+    I24,
+    U32,
     I32,
+    U64,
+    I64,
     F32,
+    F64,
 }
 
 /// One callback's samples, in the device's format.
@@ -86,9 +93,16 @@ pub(crate) enum SampleFormat {
 pub(crate) enum InputData<'a> {
     U8(&'a [u8]),
     I8(&'a [i8]),
+    U16(&'a [u16]),
     I16(&'a [i16]),
+    U24(&'a [U24]),
+    I24(&'a [I24]),
+    U32(&'a [u32]),
     I32(&'a [i32]),
+    U64(&'a [u64]),
+    I64(&'a [i64]),
     F32(&'a [f32]),
+    F64(&'a [f64]),
 }
 
 /// A device sample type. The conversion to `f32` is `dasp_sample`'s, which is
@@ -116,7 +130,11 @@ macro_rules! input_sample {
     )*};
 }
 
-input_sample!(u8 => U8, i8 => I8, i16 => I16, i32 => I32, f32 => F32);
+input_sample!(
+    u8 => U8, i8 => I8, u16 => U16, i16 => I16, U24 => U24, I24 => I24, u32 => U32,
+    i32 => I32, u64 => U64, i64 => I64,
+    f32 => F32, f64 => F64
+);
 
 /// A platform error, classified by the backend adapter. The message is the
 /// platform's own, kept verbatim, except for errors the stream survives,

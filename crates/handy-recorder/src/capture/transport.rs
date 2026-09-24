@@ -176,6 +176,10 @@ pub fn is_microphone_access_denied(error_message: &str) -> bool {
     normalized.contains("access is denied")
         || normalized.contains("permission denied")
         || normalized.contains("0x80070005")
+        // E_ACCESSDENIED as cpal's WASAPI host formats it (io::Error, decimal
+        // HRESULT). Unlike the text above, this does not depend on the
+        // Windows display language.
+        || normalized.contains("os error -2147024891")
 }
 
 pub fn is_no_input_device_error(error_message: &str) -> bool {
