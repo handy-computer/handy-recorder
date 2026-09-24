@@ -1499,6 +1499,7 @@ fn probe_bluetooth_handoff(opts: &Opts) -> Result<Outcome, Error> {
         ACTION_WAIT.as_secs()
     );
     let asked = Instant::now();
+    let mut stale = false;
     let failure = opened.failures.recv_timeout(ACTION_WAIT).ok();
     let stopped = opened.recorder.stop();
     let first = match (&failure, &stopped) {
@@ -1521,12 +1522,11 @@ fn probe_bluetooth_handoff(opts: &Opts) -> Result<Outcome, Error> {
             );
             say!("  {line}");
             if silent >= 1.0 {
-                drop(opened);
-                return Ok(Outcome::Fail(format!(
-                    "stale stream after handoff: {line} (the library only logs this; see TODO.md, \"Digital silence\")"
-                )));
+                stale = true;
+                format!("stale stream: {line}")
+            } else {
+                format!("{line} (the headset may not have moved)")
             }
-            format!("{line} (the headset may not have moved)")
         }
         (None, Err(e)) => format!("stop failed: {e}"),
     };
@@ -1535,6 +1535,11 @@ fn probe_bluetooth_handoff(opts: &Opts) -> Result<Outcome, Error> {
         "Bring {name} back to this computer (select it in the menu bar / sound settings), then continue."
     ));
     match recover_quietly(device.as_deref()) {
+        // A stale stream is the library's failure to report the handoff.
+        Ok(r) if stale => Ok(Outcome::Fail(format!(
+            "{first} (the library only logs digital silence; see TODO.md, \"Digital silence\"); \
+             back on this computer: {r}"
+        ))),
         Ok(r) => Ok(Outcome::Info(format!(
             "{first}; back on this computer: {r}"
         ))),

@@ -174,6 +174,15 @@ amplitude; the delivery thread now logs at `warn` when a whole recording,
 or a run of 1 s or more, is exact digital silence. Review whether this
 should also be a statistic on `Stopped` (a public API addition).
 
+**Bluetooth handoff is this bug, reproduced (2026-09-24, macOS, AirPods
+Pro 3 shared with a phone):** moving the AirPods to the phone mid-recording
+left the Mac's AirPods device present, with callbacks on schedule and no
+platform error, delivering exact zeros (24.5 s of the 30 s recording). The
+recorder reported nothing; only the stop-time `warn` noticed. Decision
+needed: see the options in the session notes (a platform signal for the
+handoff mapped to `DeviceLost`; a sustained-digital-silence failure; or
+silence surfaced on `Stopped`).
+
 Location: `capture/delivery.rs` (`observe_silence`, `stop`).
 
 ### Sleep and wake
