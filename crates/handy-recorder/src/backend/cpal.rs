@@ -3,7 +3,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
 
@@ -22,22 +22,38 @@ use crate::InputDevice;
 /// an open fails so a stale rate/format self-heals on the caller's retry.
 type ConfigCache = Arc<Mutex<Option<(cpal::DeviceId, cpal::SupportedStreamConfig)>>>;
 
-#[derive(Default)]
 pub(crate) struct CpalBackend {
+    host: cpal::Host,
     config_cache: ConfigCache,
 }
 
-impl CpalBackend {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
+// One host for the process: the PulseAudio host opens a server connection
+// when created. Both are thread-safe on every target this compiles for.
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<cpal::Host>();
+    assert_send_sync::<cpal::Device>();
+};
 
-/// Handy forces the ALSA host on Linux. The library targets the native
-/// PulseAudio host there (with ALSA fallback), which `default_host` selects
-/// when the `pulseaudio` feature is enabled and a server is running.
-fn host() -> cpal::Host {
-    cpal::default_host()
+impl CpalBackend {
+    /// The process-wide backend. Sharing it also shares Handy's
+    /// preferred-config cache across recorders, so reopening a device skips
+    /// the HAL queries.
+    pub fn shared() -> Arc<Self> {
+        static SHARED: OnceLock<Arc<CpalBackend>> = OnceLock::new();
+        Arc::clone(SHARED.get_or_init(|| Arc::new(Self::new())))
+    }
+
+    /// Handy forces the ALSA host on Linux. The library targets the native
+    /// PulseAudio host there (with ALSA fallback), which `default_host`
+    /// selects when the `pulseaudio` feature is enabled and a server is
+    /// running.
+    pub fn new() -> Self {
+        Self {
+            host: cpal::default_host(),
+            config_cache: ConfigCache::default(),
+        }
+    }
 }
 
 fn device_name(device: &cpal::Device) -> String {
@@ -94,16 +110,16 @@ fn enumerate(host: &cpal::Host) -> Result<Vec<(InputDevice, cpal::Device)>, Back
 
 impl Backend for CpalBackend {
     fn list_input_devices(&self) -> Result<Vec<InputDevice>, BackendError> {
-        Ok(enumerate(&host())?
+        Ok(enumerate(&self.host)?
             .into_iter()
             .map(|(info, _)| info)
             .collect())
     }
 
     fn open_device(&self, id: Option<&str>) -> Result<Box<dyn OpenDevice>, BackendError> {
-        let host = host();
+        let host = &self.host;
         let (info, device) = match id {
-            Some(id) => enumerate(&host)?
+            Some(id) => enumerate(host)?
                 .into_iter()
                 .find(|(info, _)| info.id == id)
                 .ok_or_else(|| {
@@ -120,7 +136,7 @@ impl Backend for CpalBackend {
                     )
                 })?;
                 let id = device.id().ok();
-                let info = enumerate(&host)
+                let info = enumerate(host)
                     .ok()
                     .and_then(|devices| {
                         devices
@@ -295,20 +311,36 @@ where
 /// Keeps Handy's message prefixes, which say which step failed (and which
 /// Handy's `is_no_input_device_error` matches on).
 fn map_error_during(step: &str, e: cpal::Error) -> BackendError {
-    let kind = map_error(e.clone()).kind;
-    BackendError::new(kind, format!("{step}: {e}"))
+    BackendError::new(map_kind(e.kind()), format!("{step}: {e}"))
 }
 
 fn map_error(e: cpal::Error) -> BackendError {
-    let kind = match e.kind() {
+    let kind = map_kind(e.kind());
+    if kind.stream_survives() {
+        // May be reported repeatedly on the audio thread (xruns under load),
+        // so it carries a fixed description instead of an allocated message.
+        let message = match kind {
+            BackendErrorKind::DeviceChanged => "The stream was rerouted to a new default device",
+            BackendErrorKind::Xrun => "A buffer overrun or underrun occurred",
+            _ => "Real-time scheduling was refused for the audio thread",
+        };
+        return BackendError::new(kind, message);
+    }
+    BackendError::new(kind, e.to_string())
+}
+
+fn map_kind(kind: cpal::ErrorKind) -> BackendErrorKind {
+    match kind {
         cpal::ErrorKind::DeviceNotAvailable => BackendErrorKind::DeviceNotAvailable,
         cpal::ErrorKind::DeviceBusy => BackendErrorKind::DeviceBusy,
         cpal::ErrorKind::PermissionDenied => BackendErrorKind::PermissionDenied,
         cpal::ErrorKind::UnsupportedConfig => BackendErrorKind::UnsupportedConfig,
         cpal::ErrorKind::StreamInvalidated => BackendErrorKind::StreamInvalidated,
+        cpal::ErrorKind::DeviceChanged => BackendErrorKind::DeviceChanged,
+        cpal::ErrorKind::Xrun => BackendErrorKind::Xrun,
+        cpal::ErrorKind::RealtimeDenied => BackendErrorKind::RealtimeDenied,
         _ => BackendErrorKind::Other,
-    };
-    BackendError::new(kind, e.to_string())
+    }
 }
 
 fn get_preferred_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, cpal::Error> {
@@ -366,7 +398,59 @@ fn get_preferred_config(device: &cpal::Device) -> Result<cpal::SupportedStreamCo
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
+
+    #[test]
+    fn errors_the_stream_survives_are_classified_without_allocating() {
+        for (cpal_kind, kind) in [
+            (
+                cpal::ErrorKind::DeviceChanged,
+                BackendErrorKind::DeviceChanged,
+            ),
+            (cpal::ErrorKind::Xrun, BackendErrorKind::Xrun),
+            (
+                cpal::ErrorKind::RealtimeDenied,
+                BackendErrorKind::RealtimeDenied,
+            ),
+        ] {
+            let error = map_error(cpal::Error::with_message(cpal_kind, "detail"));
+            assert_eq!(error.kind, kind);
+            assert!(error.kind.stream_survives());
+            assert!(matches!(error.message, Cow::Borrowed(_)));
+        }
+    }
+
+    #[test]
+    fn errors_that_end_the_stream_keep_the_platform_message() {
+        for (cpal_kind, kind) in [
+            (
+                cpal::ErrorKind::DeviceNotAvailable,
+                BackendErrorKind::DeviceNotAvailable,
+            ),
+            (
+                cpal::ErrorKind::StreamInvalidated,
+                BackendErrorKind::StreamInvalidated,
+            ),
+            (
+                cpal::ErrorKind::PermissionDenied,
+                BackendErrorKind::PermissionDenied,
+            ),
+            (cpal::ErrorKind::BackendError, BackendErrorKind::Other),
+        ] {
+            let error = map_error(cpal::Error::with_message(cpal_kind, "AUDCLNT_E_X"));
+            assert_eq!(error.kind, kind);
+            assert!(!error.kind.stream_survives());
+            assert_eq!(error.message, "AUDCLNT_E_X");
+        }
+        let error = map_error_during(
+            "Failed to build input stream",
+            cpal::Error::with_message(cpal::ErrorKind::PermissionDenied, "Unauthorized"),
+        );
+        assert_eq!(error.kind, BackendErrorKind::PermissionDenied);
+        assert_eq!(error.message, "Failed to build input stream: Unauthorized");
+    }
 
     /// Real hardware: lists input devices, then opens each by ID and reads
     /// its format. Run with `cargo test -- --ignored --nocapture`.
@@ -396,4 +480,3 @@ mod tests {
         assert!(default.info().is_default);
     }
 }
-

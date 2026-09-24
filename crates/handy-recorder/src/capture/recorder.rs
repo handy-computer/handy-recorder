@@ -11,7 +11,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 
 use super::FrameResampler;
 use crate::backend::{
-    cpal::CpalBackend, Backend, BackendError, InputData, InputSample, InputStream, OpenDevice,
+    cpal::CpalBackend, Backend, BackendError, BackendErrorKind, InputData, InputSample, InputStream, OpenDevice,
 };
 use crate::InputDevice;
 
@@ -86,7 +86,7 @@ pub struct AudioRecorder {
 
 impl AudioRecorder {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        Ok(Self::with_backend(Arc::new(CpalBackend::new())))
+        Ok(Self::with_backend(CpalBackend::shared()))
     }
 
     pub(crate) fn with_backend(backend: Arc<dyn Backend>) -> Self {
@@ -147,7 +147,7 @@ impl AudioRecorder {
         self.stream_error.store(false, Ordering::Relaxed);
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
-        let (init_tx, init_rx) = mpsc::sync_channel::<Result<InputDevice, String>>(1);
+        let (init_tx, init_rx) = mpsc::sync_channel::<Result<InputDevice, BackendError>>(1);
 
         let backend = Arc::clone(&self.backend);
         let device_id = device.map(str::to_owned);
@@ -161,10 +161,8 @@ impl AudioRecorder {
 
         let worker = std::thread::spawn(move || {
             let transport = worker_transport;
-            let init_result = (|| -> Result<OpenedStream, String> {
-                let device = backend
-                    .open_device(device_id.as_deref())
-                    .map_err(|e| e.to_string())?;
+            let init_result = (|| -> Result<OpenedStream, BackendError> {
+                let device = backend.open_device(device_id.as_deref())?;
                 let info = device.info().clone();
                 let format = device.format();
                 let sample_rate = format.sample_rate;
@@ -198,8 +196,7 @@ impl AudioRecorder {
                     selected_channel,
                     Arc::clone(&transport),
                     Arc::clone(&stream_error),
-                )
-                .map_err(|e| e.to_string())?;
+                )?;
 
                 Ok((stream, info, sample_rate, sample_consumer))
             })();
@@ -225,9 +222,9 @@ impl AudioRecorder {
                     );
                     drop(stream);
                 }
-                Err(error_message) => {
-                    log::error!("{error_message}");
-                    let _ = init_tx.send(Err(error_message));
+                Err(error) => {
+                    log::error!("{error}");
+                    let _ = init_tx.send(Err(error));
                 }
             }
         });
@@ -243,9 +240,15 @@ impl AudioRecorder {
                 }
                 Ok(())
             }
-            Ok(Err(error_message)) => {
+            Ok(Err(error)) => {
                 let _ = worker.join();
-                let kind = if is_microphone_access_denied(&error_message) {
+                // Handy matches the message; the backend's classification also
+                // catches platforms whose message says neither (CoreAudio's
+                // is "Unauthorized").
+                let error_message = error.to_string();
+                let kind = if error.kind == BackendErrorKind::PermissionDenied
+                    || is_microphone_access_denied(&error_message)
+                {
                     std::io::ErrorKind::PermissionDenied
                 } else {
                     std::io::ErrorKind::Other

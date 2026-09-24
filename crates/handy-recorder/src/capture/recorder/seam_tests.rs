@@ -70,6 +70,22 @@ fn open_failure_keeps_the_platform_message_and_permission_kind() {
 }
 
 #[test]
+fn permission_denied_is_recognized_by_kind_as_well_as_message() {
+    let fake = fake();
+    let mut recorder = recorder(&fake);
+    // CoreAudio's message for a denied microphone matches none of Handy's
+    // patterns.
+    fake.fail_next_open(BackendError::new(
+        BackendErrorKind::PermissionDenied,
+        "Failed to build input stream: Unauthorized",
+    ));
+
+    let error = recorder.open(None).unwrap_err();
+    let io = error.downcast_ref::<std::io::Error>().expect("io::Error");
+    assert_eq!(io.kind(), std::io::ErrorKind::PermissionDenied);
+}
+
+#[test]
 fn stream_error_marks_the_stream_for_rebuild_and_reopen_replaces_it() {
     let fake = fake();
     let mut recorder = recorder(&fake);

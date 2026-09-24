@@ -10,7 +10,7 @@ pub(crate) mod cpal;
 #[cfg(test)]
 pub(crate) mod fake;
 
-use std::fmt;
+use std::{borrow::Cow, fmt};
 
 use dasp_sample::Sample;
 
@@ -107,11 +107,13 @@ macro_rules! input_sample {
 input_sample!(u8 => U8, i8 => I8, i16 => I16, i32 => I32, f32 => F32);
 
 /// A platform error, classified by the backend adapter. The message is the
-/// platform's own, kept verbatim.
+/// platform's own, kept verbatim, except for errors the stream survives,
+/// which carry a fixed description so reporting them never allocates on the
+/// audio thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BackendError {
     pub kind: BackendErrorKind,
-    pub message: String,
+    pub message: Cow<'static, str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,12 +127,29 @@ pub(crate) enum BackendErrorKind {
     UnsupportedConfig,
     /// The stream can no longer run as built.
     StreamInvalidated,
+    /// The stream was rerouted to a new default device and keeps running.
+    DeviceChanged,
+    /// A buffer overrun or underrun; the stream keeps running.
+    Xrun,
+    /// Real-time scheduling was refused; the stream keeps running.
+    RealtimeDenied,
     /// Anything else.
     Other,
 }
 
+impl BackendErrorKind {
+    /// Whether the platform documents the stream as still running after
+    /// reporting this error.
+    pub fn stream_survives(self) -> bool {
+        matches!(
+            self,
+            Self::DeviceChanged | Self::Xrun | Self::RealtimeDenied
+        )
+    }
+}
+
 impl BackendError {
-    pub fn new(kind: BackendErrorKind, message: impl Into<String>) -> Self {
+    pub fn new(kind: BackendErrorKind, message: impl Into<Cow<'static, str>>) -> Self {
         Self {
             kind,
             message: message.into(),
