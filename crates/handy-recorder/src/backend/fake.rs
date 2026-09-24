@@ -8,7 +8,7 @@ use super::{
     Backend, BackendError, BackendErrorKind, DataCallback, DeviceFormat, ErrorCallback,
     InputSample, InputStream, OpenDevice,
 };
-use crate::InputDevice;
+use crate::{InputDevice, Permission};
 
 /// One fake device. Clones share state, so a test keeps a clone to drive the
 /// stream a recorder opened.
@@ -33,6 +33,8 @@ struct State {
     start_gate: Option<Gate>,
     /// Makes stream teardown hang until the gate opens.
     teardown_gate: Option<Gate>,
+    /// `None` reads as `Granted`.
+    permission: Option<Permission>,
 }
 
 /// Holds a platform call until opened, like a driver that hangs.
@@ -115,6 +117,10 @@ impl FakeBackend {
         gate
     }
 
+    pub fn set_permission(&self, permission: Permission) {
+        self.shared.state.lock().unwrap().permission = Some(permission);
+    }
+
     pub fn is_streaming(&self) -> bool {
         self.shared.state.lock().unwrap().stream.is_some()
     }
@@ -125,6 +131,15 @@ impl FakeBackend {
 }
 
 impl Backend for FakeBackend {
+    fn permission_status(&self) -> Permission {
+        self.shared
+            .state
+            .lock()
+            .unwrap()
+            .permission
+            .unwrap_or(Permission::Granted)
+    }
+
     fn list_input_devices(&self) -> Result<Vec<InputDevice>, BackendError> {
         Ok(vec![self.shared.device.clone()])
     }

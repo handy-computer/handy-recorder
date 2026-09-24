@@ -28,8 +28,8 @@ use super::transport::{
 };
 use crate::backend::{Backend, BackendError, BackendErrorKind, InputData, InputStream};
 use crate::{
-    Channels, Error, ErrorKind, Format, InputDevice, RecorderConfig, RecorderInfo, Sink,
-    StartError, Stopped,
+    Channels, Error, ErrorKind, Format, InputDevice, Permission, RecorderConfig, RecorderInfo,
+    Sink, StartError, Stopped,
 };
 
 // Two seconds of ring capacity absorbs consumer stalls without adding latency
@@ -193,6 +193,7 @@ struct Threads {
 
 pub(crate) struct Engine<S> {
     pub(crate) shared: Arc<Shared>,
+    backend: Arc<dyn Backend>,
     info: RecorderInfo,
     delivery_tx: mpsc::Sender<DeliveryCmd<S>>,
     slot: Mutex<Slot>,
@@ -222,6 +223,7 @@ impl<S: Sink> Engine<S> {
         let open_state = Arc::new(Mutex::new(OpenState::Pending));
         let (device_exit_tx, device_exit) = mpsc::channel::<()>();
 
+        let engine_backend = Arc::clone(&backend);
         let device = {
             let shared = Arc::clone(&shared);
             let open_state = Arc::clone(&open_state);
@@ -326,6 +328,7 @@ impl<S: Sink> Engine<S> {
 
         Ok(Self {
             shared,
+            backend: engine_backend,
             info,
             delivery_tx,
             slot: Mutex::new(Slot::Idle),
@@ -353,6 +356,14 @@ impl<S: Sink> Engine<S> {
             });
         }
         if let Some(error) = self.shared.failure() {
+            return Err(StartError { error, sink });
+        }
+        // Access revoked while the recorder was open: macOS keeps the stream
+        // running and delivers exact zeros, so the recorder fails instead.
+        if self.backend.permission_status() == Permission::Denied {
+            let error = self.shared.fail(permission_denied(
+                self.shared.error(ErrorKind::PermissionDenied),
+            ));
             return Err(StartError { error, sink });
         }
         if let Err(mpsc::SendError(cmd)) = self
@@ -510,6 +521,12 @@ fn default_frames_per_chunk(sample_rate: u32) -> usize {
     ((sample_rate as usize + 50) / 100).max(1)
 }
 
+fn permission_denied(error: Error) -> Error {
+    error.with_detail(
+        "microphone access is denied for this app (macOS: System Settings > Privacy & Security > Microphone)",
+    )
+}
+
 /// Maps a platform error during open.
 fn open_error(error: BackendError, device: Option<&InputDevice>) -> Error {
     let message = error.message.to_string();
@@ -560,6 +577,11 @@ fn open_stream(
         .map_err(|e| open_error(e, None))?;
     let info = device.info().clone();
     let _ = shared.device.set(info.clone());
+    // macOS opens a denied microphone and delivers exact zeros; say so
+    // instead of recording silence.
+    if backend.permission_status() == Permission::Denied {
+        return Err(permission_denied(shared.error(ErrorKind::PermissionDenied)));
+    }
     let device_format = device.format();
     let channels = device_format.channels as usize;
     let in_rate = device_format.sample_rate;

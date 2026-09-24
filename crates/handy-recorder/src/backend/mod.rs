@@ -14,7 +14,7 @@ use std::{borrow::Cow, fmt};
 
 use dasp_sample::Sample;
 
-use crate::InputDevice;
+use crate::{InputDevice, Permission};
 
 pub(crate) trait Backend: Send + Sync + 'static {
     fn list_input_devices(&self) -> Result<Vec<InputDevice>, BackendError>;
@@ -22,6 +22,10 @@ pub(crate) trait Backend: Send + Sync + 'static {
     /// Resolves `id` (an `InputDevice::id`), or the system default for
     /// `None`, and reads the format the OS has it set to. Opens no stream.
     fn open_device(&self, id: Option<&str>) -> Result<Box<dyn OpenDevice>, BackendError>;
+
+    /// Microphone permission, as `crate::permission_status` reports it. A
+    /// synchronous read that never prompts.
+    fn permission_status(&self) -> Permission;
 }
 
 /// A resolved device whose input stream has not been built yet.

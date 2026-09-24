@@ -13,7 +13,7 @@ use super::{
     Backend, BackendError, BackendErrorKind, DataCallback, DeviceFormat, ErrorCallback,
     InputSample, InputStream, OpenDevice, SampleFormat,
 };
-use crate::InputDevice;
+use crate::{InputDevice, Permission};
 
 /// Preferred stream config cached per device. The two HAL property queries
 /// in `get_preferred_config` cost ~40-85ms per open (worse on USB/Bluetooth),
@@ -133,6 +133,10 @@ fn enumerate(
 }
 
 impl Backend for CpalBackend {
+    fn permission_status(&self) -> Permission {
+        crate::device::platform_permission_status()
+    }
+
     fn list_input_devices(&self) -> Result<Vec<InputDevice>, BackendError> {
         Ok(enumerate(&self.host, true)?
             .into_iter()

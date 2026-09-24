@@ -112,11 +112,17 @@ Location: `backend/cpal.rs` (`map_error`), `capture/engine.rs` (`open_stream`).
   path from a resampler error to a failed recorder is covered only by
   reading. A test hook that injects a resampler error would cover it.
 - Real hardware: device loss, stream invalidation, default-device changes,
-  sleep/wake, and slow Bluetooth start have only run against the fake. The
-  tier-3 probes exist outside this repository for now
-  (`../handy-recorder-probe`); the non-interactive ones pass on macOS,
-  including a real `SinkStalled` trip. The interactive ones need a
-  hardware session. DESIGN.md places them at `tools/probe/`.
+  sleep/wake, and slow Bluetooth start are probed on macOS only. The
+  tier-3 probes live outside this repository for now
+  (`../handy-recorder-probe`; DESIGN.md places them at `tools/probe/`).
+  macOS results (MacBook Pro, AirPods Pro 3, USB-C EarPods): device loss
+  reported as `DeviceLost` in about 2 s (USB) with the audio before it
+  kept, while recording and idle; reopen after reconnect works; AirPods
+  first audio 220 ms after open; sharing the microphone with another
+  process or app works in both orders; a default-input change leaves the
+  recorder on its device, with no failure and no silent switch; a real
+  `SinkStalled` trip. Open issues from the session: sleep (above) and
+  digital silence (above).
 - Windows and Linux compile (Linux type-checked with a stub `alsa.pc`)
   but have not run. Tier-2 virtual-device tests (PulseAudio and
   pipewire-pulse null sources) are not written; they need a Linux machine
@@ -140,6 +146,45 @@ with an empty `id` (and `id_is_stable: false`). It still opens; the ID
 cannot be used to reopen it. Not seen on macOS.
 
 Location: `backend/cpal.rs`, `open_device`.
+
+### Permission denied on macOS
+
+macOS opens a microphone the app may not use and delivers exact zeros,
+with no error (confirmed on hardware). `open` now fails with
+`PermissionDenied` when `permission_status()` is `Denied` (which includes
+macOS's `Restricted`), and `start` fails the recorder the same way if
+access was revoked while it was open. `NotDetermined` is left alone: macOS
+shows its prompt then, and what a recording does while the prompt is up
+belongs to the permission-request prototype.
+
+Location: `capture/engine.rs` (`open_stream`, `Engine::start`).
+
+### Digital silence
+
+Exact zeros from a real microphone mean denied access, a muted device, or
+a stale stream (the `pvrecorder` symptom): real microphones have a noise
+floor. Seen on hardware twice: with access denied, and once after
+replugging USB EarPods (2 s of zeros in both disconnect probes; not
+reproduced by the `replug` probe, where the cached config and a fresh
+process both recorded real audio). The watchdog deliberately ignores
+amplitude; the delivery thread now logs at `warn` when a whole recording,
+or a run of 1 s or more, is exact digital silence. Review whether this
+should also be a statistic on `Stopped` (a public API addition).
+
+Location: `capture/delivery.rs` (`observe_silence`, `stop`).
+
+### Sleep and wake (hardware results)
+
+macOS stops input callbacks when the sleep sequence starts: on this
+MacBook the display turned off at 12:38:33, the watchdog tripped `Stalled`
+at 12:38:38 (5.0 s without callbacks), and the system entered sleep at
+12:38:38 (`pmset -g log`). So the false positive happens while still
+awake, and a sleep notification would race it. Whether a stream resumes
+after wake is not yet known; a raw-CPAL probe (`sleep-raw` in the
+out-of-tree probe crate) measures it. AirPods disconnect when the Mac
+sleeps; that was correctly reported as `DeviceLost`.
+
+Location: `capture/engine.rs`, `Watchdog`.
 
 ## Changes from Handy to confirm
 

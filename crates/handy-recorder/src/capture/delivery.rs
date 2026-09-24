@@ -173,6 +173,26 @@ struct Active<S> {
     input_frames: u64,
     /// Real frames delivered to the sink (the sum of `valid_frames`).
     output_frames: u64,
+    /// Exact digital silence: a real microphone always has a noise floor,
+    /// so long runs of exact zeros mean denied access, a muted device, or
+    /// a stale stream. Reported, never acted on.
+    zero_run: u64,
+    longest_zero_run: u64,
+    heard_nonzero: bool,
+}
+
+impl<S> Active<S> {
+    fn observe_silence(&mut self, raw: &[f32], channels: usize) {
+        for frame in raw.chunks_exact(channels) {
+            if frame.iter().all(|&s| s == 0.0) {
+                self.zero_run += 1;
+            } else {
+                self.longest_zero_run = self.longest_zero_run.max(self.zero_run);
+                self.zero_run = 0;
+                self.heard_nonzero = true;
+            }
+        }
+    }
 }
 
 struct Processor<S> {
@@ -225,6 +245,9 @@ impl<S: Sink> Processor<S> {
             first_chunk_after: None,
             input_frames: 0,
             output_frames: 0,
+            zero_run: 0,
+            longest_zero_run: 0,
+            heard_nonzero: false,
         });
         #[cfg(test)]
         self.shared
@@ -260,6 +283,7 @@ impl<S: Sink> Processor<S> {
             return;
         };
         active.input_frames += (raw.len() / self.channels) as u64;
+        active.observe_silence(raw, self.channels);
         let format = (self.out_sample_rate, self.channels as u16);
         let result = self.resampler.push(raw, |samples, valid| {
             deliver(active, samples, valid, format)
@@ -396,6 +420,7 @@ impl<S: Sink> Processor<S> {
 
         let failure = self.shared.failure();
         let active = self.active.take()?;
+        let longest_zero_run = active.longest_zero_run.max(active.zero_run);
         let end_reason = active.ended.unwrap_or(match failure {
             Some(error) => EndReason::RecorderFailed(error),
             None => EndReason::StopCalled,
@@ -418,6 +443,19 @@ impl<S: Sink> Processor<S> {
             active.overrun_episodes,
             active.first_chunk_after,
         );
+        // TODO(review): see TODO.md, "Digital silence".
+        let rate = self.in_sample_rate as f64;
+        if active.input_frames > 0 && !active.heard_nonzero {
+            log::warn!(
+                "the whole recording ({:.1} s) was exact digital silence: microphone access denied, a muted device, or a stale stream",
+                active.input_frames as f64 / rate
+            );
+        } else if longest_zero_run >= self.in_sample_rate as u64 {
+            log::warn!(
+                "the recording contained {:.1} s of exact digital silence: a muted device or a stalled stream",
+                longest_zero_run as f64 / rate
+            );
+        }
         if !stopped.is_complete() {
             log::warn!(
                 "incomplete recording: {:?}, {} frames dropped",
@@ -464,5 +502,45 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
         s.clone()
     } else {
         "non-string panic payload".to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Active;
+    use std::time::Instant;
+
+    fn active() -> Active<()> {
+        Active {
+            sink: (),
+            ended: None,
+            dropped_frames: 0,
+            overrun_episodes: 0,
+            started: Instant::now(),
+            first_chunk_after: None,
+            input_frames: 0,
+            output_frames: 0,
+            zero_run: 0,
+            longest_zero_run: 0,
+            heard_nonzero: false,
+        }
+    }
+
+    #[test]
+    fn silence_tracking_counts_runs_of_all_zero_frames() {
+        let mut a = active();
+        a.observe_silence(&[0.0; 8], 2);
+        assert!(!a.heard_nonzero);
+        assert_eq!(a.zero_run, 4);
+
+        // A frame with any nonzero channel ends the run.
+        a.observe_silence(&[0.0, 1e-9, 0.0, 0.0], 2);
+        assert!(a.heard_nonzero);
+        assert_eq!(a.longest_zero_run, 4);
+        assert_eq!(a.zero_run, 1);
+
+        // Runs continue across drained chunks.
+        a.observe_silence(&[0.0; 20], 2);
+        assert_eq!(a.zero_run, 11);
     }
 }

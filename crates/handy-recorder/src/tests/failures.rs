@@ -564,3 +564,45 @@ fn every_start_failure_returns_the_sink() {
     support::wait_until("failed", || !fake.is_streaming());
     assert_eq!(recorder.start(Tagged(3)).unwrap_err().sink, Tagged(3));
 }
+
+#[test]
+fn denied_microphone_access_fails_open_instead_of_recording_silence() {
+    let fake = fake(16_000, 1);
+    fake.set_permission(crate::Permission::Denied);
+    let error = open_with::<CollectingSink>(&fake, passthrough(), timeouts())
+        .err()
+        .expect("open fails");
+    assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+    assert_eq!(error.device().unwrap().name, "Fake Mic");
+    assert!(error.detail().unwrap().contains("Privacy & Security"));
+    assert_eq!(fake.streams_started(), 0, "no stream was built");
+
+    // Not yet asked: open proceeds (macOS shows its prompt).
+    fake.set_permission(crate::Permission::NotDetermined);
+    open_with::<CollectingSink>(&fake, passthrough(), timeouts()).expect("opens");
+}
+
+#[test]
+fn access_revoked_while_open_fails_the_recorder_at_start() {
+    let fake = fake(16_000, 1);
+    let (recorder, failures) = open_notified::<CollectingSink>(&fake, passthrough(), timeouts());
+    fake.set_permission(crate::Permission::Denied);
+
+    let error = recorder.start(CollectingSink::new()).unwrap_err();
+    assert_eq!(error.error.kind(), ErrorKind::PermissionDenied);
+    assert_eq!(
+        failures.recv_timeout(support::WAIT).unwrap().kind(),
+        ErrorKind::PermissionDenied
+    );
+    support::wait_until("stream torn down", || !fake.is_streaming());
+    // A failed recorder stays failed, even if access comes back.
+    fake.set_permission(crate::Permission::Granted);
+    assert_eq!(
+        recorder
+            .start(CollectingSink::new())
+            .unwrap_err()
+            .error
+            .kind(),
+        ErrorKind::PermissionDenied
+    );
+}

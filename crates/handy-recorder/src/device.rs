@@ -49,7 +49,7 @@ pub fn permission_status() -> Permission {
 }
 
 #[cfg(target_os = "macos")]
-fn platform_permission_status() -> Permission {
+pub(crate) fn platform_permission_status() -> Permission {
     use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
 
     // SAFETY: AVMediaTypeAudio is an immutable framework constant.
@@ -70,6 +70,6 @@ fn platform_permission_status() -> Permission {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_permission_status() -> Permission {
+pub(crate) fn platform_permission_status() -> Permission {
     Permission::Unknown
 }
