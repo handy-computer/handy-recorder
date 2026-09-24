@@ -173,18 +173,32 @@ should also be a statistic on `Stopped` (a public API addition).
 
 Location: `capture/delivery.rs` (`observe_silence`, `stop`).
 
-### Sleep and wake (hardware results)
+### Sleep and wake
 
-macOS stops input callbacks when the sleep sequence starts: on this
-MacBook the display turned off at 12:38:33, the watchdog tripped `Stalled`
-at 12:38:38 (5.0 s without callbacks), and the system entered sleep at
-12:38:38 (`pmset -g log`). So the false positive happens while still
-awake, and a sleep notification would race it. Whether a stream resumes
-after wake is not yet known; a raw-CPAL probe (`sleep-raw` in the
-out-of-tree probe crate) measures it. AirPods disconnect when the Mac
-sleeps; that was correctly reported as `DeviceLost`.
+Measured on a MacBook (built-in microphone, `sleep-wake` and `sleep-raw`
+probes): macOS stops input callbacks when the sleep sequence starts, about
+5 s before the system sleeps, and resumes them after wake on the same
+stream, with no platform error. The gap was 32.6 s of process uptime
+(203.8 s wall): uptime excludes true sleep, but maintenance wakes run
+processes without audio. No usable stall bound survives that, and a sleep
+notification would race the stop.
 
-Location: `capture/engine.rs`, `Watchdog`.
+Decision taken: a stall is a failure only during a recording. While idle it
+is logged at `info` and forgiven when callbacks resume. During a recording
+the silence counts from the later of the last callback and the recording's
+start, so a recording started just after wake gets the full bound. To
+review:
+
+- Sleeping during a recording still fails the recorder with `Stalled`
+  (the recording would otherwise stitch audio across the sleep), although
+  the stream itself would resume. Ending only the recording would need a
+  new `EndReason`.
+- A stream that dies silently while idle is now noticed only once a
+  recording starts, after up to the stall bound (5 s) of it. `NoAudio`
+  (no callback ever) still fails while idle.
+- AirPods disconnect when the Mac sleeps; that is reported as `DeviceLost`.
+
+Location: `capture/engine.rs`, `Watchdog::check`.
 
 ## Changes from Handy to confirm
 

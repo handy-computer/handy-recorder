@@ -606,3 +606,76 @@ fn access_revoked_while_open_fails_the_recorder_at_start() {
         ErrorKind::PermissionDenied
     );
 }
+
+/// macOS stops callbacks for tens of seconds of awake time around system
+/// sleep, then resumes them (measured on hardware with the `sleep-raw`
+/// probe).
+#[test]
+fn a_stall_while_idle_is_not_a_failure() {
+    let fake = fake(16_000, 1);
+    let mut t = timeouts();
+    t.stall = Duration::from_millis(100);
+    let (recorder, failures) = open_notified::<Chunks>(&fake, passthrough(), t);
+    push_idle(&recorder, &fake, &ramp(0, 160));
+    // "Asleep": no callbacks for several stall bounds.
+    thread::sleep(Duration::from_millis(400));
+    assert!(
+        failures.try_recv().is_err(),
+        "an idle stall failed the recorder"
+    );
+    assert!(fake.is_streaming());
+
+    // "Awake": callbacks resume and a recording works.
+    push_idle(&recorder, &fake, &ramp(0, 160));
+    start(&recorder, Chunks::default());
+    assert!(fake.push(&ramp(0, 500)));
+    let stopped = stop_with_boundary(&recorder, &fake, &[0.5f32]).unwrap();
+    assert!(stopped.is_complete());
+    assert_eq!(stopped.sink.valid_frames(), 501);
+}
+
+#[test]
+fn a_recording_started_during_a_stall_gets_the_full_bound_to_resume() {
+    let fake = fake(16_000, 1);
+    let mut t = timeouts();
+    t.stall = Duration::from_millis(300);
+    let (recorder, failures) = open_notified::<Chunks>(&fake, passthrough(), t);
+    push_idle(&recorder, &fake, &ramp(0, 160));
+    thread::sleep(Duration::from_millis(600));
+
+    // Started long after the last callback; audio resumes within the bound.
+    start(&recorder, Chunks::default());
+    thread::sleep(Duration::from_millis(100));
+    assert!(fake.push(&ramp(0, 400)));
+    let stopped = stop_with_boundary(&recorder, &fake, &[0.5f32]).unwrap();
+    assert!(stopped.is_complete(), "{:?}", stopped.end_reason);
+    assert!(failures.try_recv().is_err());
+}
+
+#[test]
+fn a_stall_that_lasts_into_a_recording_fails_with_stalled() {
+    let fake = fake(16_000, 1);
+    let mut t = timeouts();
+    t.stall = Duration::from_millis(300);
+    let (recorder, failures) = open_notified::<Chunks>(&fake, passthrough(), t);
+    push_idle(&recorder, &fake, &ramp(0, 160));
+    thread::sleep(Duration::from_millis(600));
+
+    let started = Instant::now();
+    start(&recorder, Chunks::default());
+    let error = failures
+        .recv_timeout(support::WAIT)
+        .expect("failure handler");
+    assert_eq!(error.kind(), ErrorKind::Stalled);
+    // Counted from the recording's start, not from the last callback.
+    assert!(
+        started.elapsed() >= Duration::from_millis(280),
+        "{:?}",
+        started.elapsed()
+    );
+    let stopped = recorder.stop().expect("stop");
+    assert_eq!(
+        recorder_failed(&stopped.end_reason).kind(),
+        ErrorKind::Stalled
+    );
+}

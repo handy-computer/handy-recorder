@@ -112,6 +112,9 @@ pub(crate) struct Shared {
     pub heartbeat: AtomicU64,
     /// Platform errors the stream survived (xruns, real-time denied).
     pub survived_errors: AtomicU64,
+    /// When the current recording started; `None` while idle. The watchdog
+    /// fails the recorder on a stall only while this is set.
+    recording_since: Mutex<Option<Instant>>,
     device_tx: mpsc::Sender<DeviceMsg>,
 }
 
@@ -124,6 +127,7 @@ impl Shared {
             started_at: OnceLock::new(),
             heartbeat: AtomicU64::new(0),
             survived_errors: AtomicU64::new(0),
+            recording_since: Mutex::new(None),
             device_tx,
         }
     }
@@ -381,6 +385,7 @@ impl<S: Sink> Engine<S> {
             return Err(StartError { error, sink });
         }
         *slot = Slot::Recording;
+        *self.shared.recording_since.lock().unwrap() = Some(Instant::now());
         Ok(())
     }
 
@@ -393,6 +398,7 @@ impl<S: Sink> Engine<S> {
             *slot = Slot::Stopping;
         }
         let result = self.collect();
+        *self.shared.recording_since.lock().unwrap() = None;
         *self.slot.lock().unwrap() = Slot::Idle;
         result
     }
@@ -773,6 +779,8 @@ struct Watchdog {
     last_callback_at: Instant,
     heartbeat: u64,
     last_heartbeat_at: Instant,
+    /// An idle stall was logged and not yet resolved.
+    idle_stall_logged: bool,
 }
 
 impl Watchdog {
@@ -783,6 +791,7 @@ impl Watchdog {
             last_callback_at: now,
             heartbeat: 0,
             last_heartbeat_at: now,
+            idle_stall_logged: false,
         }
     }
 
@@ -791,6 +800,13 @@ impl Watchdog {
         let now = Instant::now();
         let callbacks = shared.transport.callbacks.load(Ordering::Relaxed);
         if callbacks != self.callbacks {
+            if self.idle_stall_logged {
+                self.idle_stall_logged = false;
+                log::info!(
+                    "audio callbacks resumed after {:.1} s",
+                    (now - self.last_callback_at).as_secs_f64()
+                );
+            }
             self.callbacks = callbacks;
             self.last_callback_at = now;
         }
@@ -810,14 +826,37 @@ impl Watchdog {
                 ))
             })
         } else {
-            let silent = now - self.last_callback_at;
-            (silent >= timeouts.stall).then(|| {
-                shared.error(ErrorKind::Stalled).with_detail(format!(
-                    "no audio callback for {:.1} s after {callbacks} callbacks (bound {:.1} s)",
-                    silent.as_secs_f64(),
-                    timeouts.stall.as_secs_f64()
-                ))
-            })
+            // macOS stops callbacks for tens of seconds of awake time around
+            // system sleep and resumes them after wake, so a stall while idle
+            // is not a failure. During a recording it is: the audio has a gap
+            // of unknown length. Silence counts from the later of the last
+            // callback and the recording's start, so a recording started
+            // just after wake gets the full bound for audio to resume.
+            let recording_since = *shared.recording_since.lock().unwrap();
+            match recording_since {
+                Some(since) => {
+                    let silent = now - self.last_callback_at.max(since);
+                    (silent >= timeouts.stall).then(|| {
+                        shared.error(ErrorKind::Stalled).with_detail(format!(
+                            "no audio callback for {:.1} s during a recording, after {callbacks} callbacks (bound {:.1} s)",
+                            silent.as_secs_f64(),
+                            timeouts.stall.as_secs_f64()
+                        ))
+                    })
+                }
+                None => {
+                    let silent = now - self.last_callback_at;
+                    if silent >= timeouts.stall && !self.idle_stall_logged {
+                        self.idle_stall_logged = true;
+                        log::info!(
+                            "no audio callbacks for {:.1} s while idle (system sleep?); \
+                             not a failure unless it lasts into a recording",
+                            silent.as_secs_f64()
+                        );
+                    }
+                    None
+                }
+            }
         };
         let error = error.or_else(|| {
             let stuck = now - self.last_heartbeat_at;
