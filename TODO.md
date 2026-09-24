@@ -13,6 +13,28 @@ open 10 s, close 5 s, delivery-thread exit at close 1 s, no audio after
 open 10 s, stall 5 s, sink heartbeat 10 s, stop's pause acknowledgement
 2 s (Handy's value), stop's overall deadline 5 s, watchdog tick 50 ms.
 
+## Where we are (for a fresh session)
+
+Branch `extract-from-handy`. Phases 1 and 2 of DESIGN.md's plan are done
+except the Handy branch. Hardware-tested on macOS only (see
+`tools/probe/README.md`, "Results so far"). DESIGN.md is not committed.
+
+Next, roughly in order:
+
+1. Bluetooth handoff signal (below, "Digital silence"): run the
+   wildcard-listener diagnostic, then decide how the library reports it.
+2. Remaining macOS probes: `audio-service-restart`
+   (`sudo killall coreaudiod`), `external-app` with a real meeting app.
+3. Windows and Linux sessions with the probe checklist
+   (`tools/probe/README.md`). Linux `audio-service-restart` is expected to
+   fail its reopen until "PulseAudio server restarts" is fixed.
+4. A review of the new engine code (`capture/engine.rs`,
+   `capture/delivery.rs`): the concurrency there has only its own tests
+   and one hardware session behind it.
+5. The phase-2 exit criterion: a Handy branch on this crate.
+6. Before the first release: the Rubato 5.x upgrade and the timeout
+   review (DESIGN.md), then phase 3 (Node binding, `pi-transcribe`).
+
 ## Decisions to review
 
 ### Device enumeration on every open
@@ -174,14 +196,22 @@ amplitude; the delivery thread now logs at `warn` when a whole recording,
 or a run of 1 s or more, is exact digital silence. Review whether this
 should also be a statistic on `Stopped` (a public API addition).
 
-**Bluetooth handoff is this bug, reproduced (2026-09-24, macOS, AirPods
-Pro 3 shared with a phone):** moving the AirPods to the phone mid-recording
-left the Mac's AirPods device present, with callbacks on schedule and no
-platform error, delivering exact zeros (24.5 s of the 30 s recording). The
-recorder reported nothing; only the stop-time `warn` noticed. Decision
-needed: see the options in the session notes (a platform signal for the
-handoff mapped to `DeviceLost`; a sustained-digital-silence failure; or
-silence surfaced on `Stopped`).
+**Bluetooth handoff (2026-09-24, macOS, AirPods Pro 3 shared with a
+phone):** moving the AirPods to the phone mid-recording leaves the Mac's
+device present, with callbacks on schedule and no platform error,
+delivering exact zeros (24.5 s and 27.6 s in two runs). When the AirPods
+come back, real audio resumes on the same stream: the handoff is a routing
+change, not a device loss. During it, nothing polled changed: Bluetooth
+stayed connected, and CoreAudio kept the device alive, running, and at the
+same rate (`tools/probe/macos/handoff_monitor.swift`). Consequences:
+
+- Failing the recorder on sustained zeros would kill a stream that
+  recovers, so it is off the table.
+- Open: whether macOS sends any CoreAudio property notification at the
+  handoff (next diagnostic: wildcard property listeners). If it does, the
+  library can report the handoff live. If not, digital silence should be
+  reported, not acted on: as a statistic on `Stopped`, or as a live,
+  non-fatal notification, which the design does not have yet. Decide.
 
 Location: `capture/delivery.rs` (`observe_silence`, `stop`).
 
