@@ -32,22 +32,86 @@ const ACTION_WAIT: Duration = Duration::from_secs(30);
 const PROBES: &[(&str, &str, bool)] = &[
     // (name, description, interactive)
     ("list", "permission status and input devices", false),
-    ("baseline", "record a few seconds; check the audio is real and complete", false),
-    ("warm-cycles", "many quick recordings on one open recorder", false),
-    ("two-clients", "two recorders on the same device at once", false),
-    ("slow-sink", "a sink whose first call blocks for --secs (default 3)", false),
-    ("second-process", "another process holds the mic; this one opens later and records too", false),
-    ("external-app", "record alongside another app (meeting app, Voice Memos), both orders", true),
-    ("slow-start", "time from open to first audio (use a Bluetooth device)", true),
-    ("disconnect-recording", "unplug/disconnect the device during a recording", true),
-    ("disconnect-idle", "unplug/disconnect the device while the recorder is open but idle", true),
-    ("bluetooth-handoff", "move a Bluetooth headset to another device (phone) mid-recording, then back", true),
-    ("replug", "diagnose silence after replugging: fresh process vs this process", true),
-    ("default-change", "change the system default input during a recording", true),
-    ("sleep-wake", "sleep and wake the machine with a recorder open (--recording: while recording)", true),
-    ("sleep-raw", "a raw CPAL stream (no watchdog) across sleep: gaps, errors, whether it resumes", true),
-    ("audio-service-restart", "restart the OS audio service during a recording; then reopen in the same process", true),
-    ("permission", "what happens with microphone access denied", true),
+    (
+        "baseline",
+        "record a few seconds; check the audio is real and complete",
+        false,
+    ),
+    (
+        "warm-cycles",
+        "many quick recordings on one open recorder",
+        false,
+    ),
+    (
+        "two-clients",
+        "two recorders on the same device at once",
+        false,
+    ),
+    (
+        "slow-sink",
+        "a sink whose first call blocks for --secs (default 3)",
+        false,
+    ),
+    (
+        "second-process",
+        "another process holds the mic; this one opens later and records too",
+        false,
+    ),
+    (
+        "external-app",
+        "record alongside another app (meeting app, Voice Memos), both orders",
+        true,
+    ),
+    (
+        "slow-start",
+        "time from open to first audio (use a Bluetooth device)",
+        true,
+    ),
+    (
+        "disconnect-recording",
+        "unplug/disconnect the device during a recording",
+        true,
+    ),
+    (
+        "disconnect-idle",
+        "unplug/disconnect the device while the recorder is open but idle",
+        true,
+    ),
+    (
+        "bluetooth-handoff",
+        "move a Bluetooth headset to another device (phone) mid-recording, then back",
+        true,
+    ),
+    (
+        "replug",
+        "diagnose silence after replugging: fresh process vs this process",
+        true,
+    ),
+    (
+        "default-change",
+        "change the system default input during a recording",
+        true,
+    ),
+    (
+        "sleep-wake",
+        "sleep and wake the machine with a recorder open (--recording: while recording)",
+        true,
+    ),
+    (
+        "sleep-raw",
+        "a raw CPAL stream (no watchdog) across sleep: gaps, errors, whether it resumes",
+        true,
+    ),
+    (
+        "audio-service-restart",
+        "restart the OS audio service during a recording; then reopen in the same process",
+        true,
+    ),
+    (
+        "permission",
+        "what happens with microphone access denied",
+        true,
+    ),
 ];
 
 fn main() -> ExitCode {
@@ -93,7 +157,9 @@ fn main() -> ExitCode {
             say!("{outcome}");
             return ExitCode::SUCCESS;
         }
-        name if PROBES.iter().any(|p| p.0 == name) => vec![PROBES.iter().find(|p| p.0 == name).unwrap().0],
+        name if PROBES.iter().any(|p| p.0 == name) => {
+            vec![PROBES.iter().find(|p| p.0 == name).unwrap().0]
+        }
         _ => {
             usage();
             return ExitCode::FAILURE;
@@ -103,7 +169,10 @@ fn main() -> ExitCode {
     let mut results = Vec::new();
     for name in names {
         let interactive = PROBES.iter().find(|p| p.0 == name).unwrap().2;
-        if probe == "all" && interactive && !ask_yes(&format!("Run the interactive probe `{name}`?")) {
+        if probe == "all"
+            && interactive
+            && !ask_yes(&format!("Run the interactive probe `{name}`?"))
+        {
             results.push((name, Outcome::Info("skipped".into())));
             continue;
         }
@@ -119,16 +188,28 @@ fn main() -> ExitCode {
         failed |= matches!(outcome, Outcome::Fail(_));
         say!("{:<22} {outcome}", name);
     }
-    if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 fn usage() {
-    eprintln!("usage: handy-recorder-probe <probe|auto|all> [--device <id>] [--secs <n>] [--recording]\n");
+    eprintln!(
+        "usage: handy-recorder-probe <probe|auto|all> [--device <id>] [--secs <n>] [--recording]\n"
+    );
     for (name, description, interactive) in PROBES {
-        eprintln!("  {name:<22} {description}{}", if *interactive { " (interactive)" } else { "" });
+        eprintln!(
+            "  {name:<22} {description}{}",
+            if *interactive { " (interactive)" } else { "" }
+        );
     }
     eprintln!("  {:<22} every non-interactive probe", "auto");
-    eprintln!("  {:<22} everything, asking before each interactive probe", "all");
+    eprintln!(
+        "  {:<22} everything, asking before each interactive probe",
+        "all"
+    );
 }
 
 #[derive(Default)]
@@ -250,7 +331,12 @@ impl ProbeSink {
 
     /// Seconds of exact digital silence at the end: the stale-stream symptom.
     fn trailing_zero_seconds(&self) -> f64 {
-        self.timeline.iter().rev().take_while(|&&p| p == 0.0).count() as f64 * 0.1
+        self.timeline
+            .iter()
+            .rev()
+            .take_while(|&&p| p == 0.0)
+            .count() as f64
+            * 0.1
     }
 
     fn describe(&self) -> String {
@@ -337,13 +423,21 @@ fn prompt(message: &str) {
     let _ = io::stdout().flush();
     report::append(&format!("\n>>> {message}"));
     let _ = io::stdin().lock().lines().next();
-    report::append(&format!("[{} operator pressed Enter]", report::timestamp(false)));
+    report::append(&format!(
+        "[{} operator pressed Enter]",
+        report::timestamp(false)
+    ));
 }
 
 fn ask_yes(question: &str) -> bool {
     print!("{question} [Y/n] ");
     let _ = io::stdout().flush();
-    let line = io::stdin().lock().lines().next().and_then(Result::ok).unwrap_or_default();
+    let line = io::stdin()
+        .lock()
+        .lines()
+        .next()
+        .and_then(Result::ok)
+        .unwrap_or_default();
     let yes = !line.trim().eq_ignore_ascii_case("n");
     report::append(&format!("{question} -> {}", if yes { "yes" } else { "no" }));
     yes
@@ -357,11 +451,21 @@ fn choose_device(opts: &Opts, purpose: &str) -> Result<Option<String>, Error> {
     let devices = list_input_devices()?;
     say!("Input devices ({purpose}):");
     for (i, d) in devices.iter().enumerate() {
-        say!("  {i}) {}{} [{}]", d.name, if d.is_default { " (default)" } else { "" }, d.id);
+        say!(
+            "  {i}) {}{} [{}]",
+            d.name,
+            if d.is_default { " (default)" } else { "" },
+            d.id
+        );
     }
     print!("Choose a number, or Enter for the default: ");
     let _ = io::stdout().flush();
-    let line = io::stdin().lock().lines().next().and_then(Result::ok).unwrap_or_default();
+    let line = io::stdin()
+        .lock()
+        .lines()
+        .next()
+        .and_then(Result::ok)
+        .unwrap_or_default();
     report::append(&format!("chose: {:?}", line.trim()));
     Ok(line
         .trim()
@@ -393,7 +497,8 @@ fn recover(device: Option<&str>, name: &str) -> Result<String, String> {
             Err(e) => return Err(format!("could not reopen after reconnecting: {e}")),
         }
     };
-    let stopped = record(&opened, 2.0).map_err(|e| format!("recording after reopen failed: {e}"))?;
+    let stopped =
+        record(&opened, 2.0).map_err(|e| format!("recording after reopen failed: {e}"))?;
     if !stopped.is_complete() || stopped.sink.frames < 16_000 || stopped.sink.peak == 0.0 {
         return Err(format!(
             "recording after reopen was not healthy: {:?}, {}",
@@ -401,7 +506,10 @@ fn recover(device: Option<&str>, name: &str) -> Result<String, String> {
             stopped.sink.describe()
         ));
     }
-    Ok(format!("reopened and recorded: {}", stopped.sink.describe()))
+    Ok(format!(
+        "reopened and recorded: {}",
+        stopped.sink.describe()
+    ))
 }
 
 /// Per-platform wording for operator actions.
@@ -412,13 +520,25 @@ fn how(action: &str) -> &'static str {
         ("sleep", _) => "`systemctl suspend`",
         ("default", "macos") => "System Settings > Sound > Input",
         ("default", "windows") => "Settings > System > Sound > Input, choose another device",
-        ("default", _) => "your desktop's sound settings, or `pactl set-default-source <name>` (`pactl list short sources`)",
-        ("permission", "macos") => "System Settings > Privacy & Security > Microphone, turn off this terminal",
-        ("permission", "windows") => "Settings > Privacy & security > Microphone, turn off \"Let desktop apps access your microphone\"",
-        ("permission", _) => "Linux has no per-app microphone permission outside sandboxes (Flatpak portals); skip this probe",
+        ("default", _) => {
+            "your desktop's sound settings, or `pactl set-default-source <name>` (`pactl list short sources`)"
+        }
+        ("permission", "macos") => {
+            "System Settings > Privacy & Security > Microphone, turn off this terminal"
+        }
+        ("permission", "windows") => {
+            "Settings > Privacy & security > Microphone, turn off \"Let desktop apps access your microphone\""
+        }
+        ("permission", _) => {
+            "Linux has no per-app microphone permission outside sandboxes (Flatpak portals); skip this probe"
+        }
         ("service", "macos") => "in another terminal: `sudo killall coreaudiod`",
-        ("service", "windows") => "in an administrator PowerShell: `Restart-Service audiosrv -Force`",
-        ("service", _) => "PipeWire: `systemctl --user restart pipewire pipewire-pulse wireplumber`; PulseAudio: `pulseaudio -k`",
+        ("service", "windows") => {
+            "in an administrator PowerShell: `Restart-Service audiosrv -Force`"
+        }
+        ("service", _) => {
+            "PipeWire: `systemctl --user restart pipewire pipewire-pulse wireplumber`; PulseAudio: `pulseaudio -k`"
+        }
         _ => "",
     }
 }
@@ -426,7 +546,10 @@ fn how(action: &str) -> &'static str {
 fn is_device_failure(kind: ErrorKind) -> bool {
     matches!(
         kind,
-        ErrorKind::DeviceLost | ErrorKind::StreamInvalidated | ErrorKind::Stalled | ErrorKind::Backend
+        ErrorKind::DeviceLost
+            | ErrorKind::StreamInvalidated
+            | ErrorKind::Stalled
+            | ErrorKind::Backend
     )
 }
 
@@ -449,7 +572,10 @@ fn probe_list() -> Result<Outcome, Error> {
     if devices.is_empty() {
         return Ok(Outcome::Fail("no input devices".into()));
     }
-    Ok(Outcome::Info(format!("permission {permission:?}, {} devices", devices.len())))
+    Ok(Outcome::Info(format!(
+        "permission {permission:?}, {} devices",
+        devices.len()
+    )))
 }
 
 fn probe_baseline(opts: &Opts) -> Result<Outcome, Error> {
@@ -460,13 +586,20 @@ fn probe_baseline(opts: &Opts) -> Result<Outcome, Error> {
     let sink = &stopped.sink;
     let detail = sink.describe();
     if !stopped.is_complete() {
-        return Ok(Outcome::Fail(format!("incomplete: {:?}, dropped {}; {detail}", stopped.end_reason, stopped.dropped_frames)));
+        return Ok(Outcome::Fail(format!(
+            "incomplete: {:?}, dropped {}; {detail}",
+            stopped.end_reason, stopped.dropped_frames
+        )));
     }
     if sink.peak == 0.0 {
-        return Ok(Outcome::Fail(format!("exact digital silence (permission denied, or a stale stream?); {detail}")));
+        return Ok(Outcome::Fail(format!(
+            "exact digital silence (permission denied, or a stale stream?); {detail}"
+        )));
     }
     if sink.seconds() < secs * 0.9 {
-        return Ok(Outcome::Fail(format!("too little audio for {secs} s; {detail}")));
+        return Ok(Outcome::Fail(format!(
+            "too little audio for {secs} s; {detail}"
+        )));
     }
     opened.recorder.close()?;
     Ok(Outcome::Pass(detail))
@@ -510,15 +643,24 @@ fn probe_two_clients(opts: &Opts) -> Result<Outcome, Error> {
     let sa = a.recorder.stop()?;
     let sb = b.recorder.stop()?;
     say!("  A: {}\n  B: {}", sa.sink.describe(), sb.sink.describe());
-    if !sa.is_complete() || !sb.is_complete() || sa.sink.frames < 28_000 || sb.sink.frames < 28_000 {
-        return Ok(Outcome::Fail("one of two simultaneous recordings was short or incomplete".into()));
+    if !sa.is_complete() || !sb.is_complete() || sa.sink.frames < 28_000 || sb.sink.frames < 28_000
+    {
+        return Ok(Outcome::Fail(
+            "one of two simultaneous recordings was short or incomplete".into(),
+        ));
     }
     a.recorder.close()?;
     let after = record(&b, 1.0)?;
     if !after.is_complete() || after.sink.frames < 14_000 || after.sink.peak == 0.0 {
-        return Ok(Outcome::Fail(format!("B after closing A: {:?}, {}", after.end_reason, after.sink.describe())));
+        return Ok(Outcome::Fail(format!(
+            "B after closing A: {:?}, {}",
+            after.end_reason,
+            after.sink.describe()
+        )));
     }
-    Ok(Outcome::Pass("both recorded simultaneously; B unaffected by closing A".into()))
+    Ok(Outcome::Pass(
+        "both recorded simultaneously; B unaffected by closing A".into(),
+    ))
 }
 
 fn probe_slow_sink(opts: &Opts) -> Result<Outcome, Error> {
@@ -536,7 +678,8 @@ fn probe_slow_sink(opts: &Opts) -> Result<Outcome, Error> {
                 "first call blocked {block:?}: {}, dropped {} frames ({:.2} s)",
                 stopped.sink.describe(),
                 stopped.dropped_frames,
-                stopped.dropped_frames as f64 / opened.recorder.info().device_format.sample_rate as f64
+                stopped.dropped_frames as f64
+                    / opened.recorder.info().device_format.sample_rate as f64
             );
             match failure {
                 Some(e) => Ok(Outcome::Fail(format!("recorder failed: {e}; {detail}"))),
@@ -553,16 +696,23 @@ fn probe_slow_sink(opts: &Opts) -> Result<Outcome, Error> {
 
 fn probe_slow_start(opts: &Opts) -> Result<Outcome, Error> {
     let device = choose_device(opts, "choose a Bluetooth device")?;
-    prompt("Make sure the device is connected but not in use by anything (AirPods: in your ears, no call or music).");
+    prompt(
+        "Make sure the device is connected but not in use by anything (AirPods: in your ears, no call or music).",
+    );
     let (tx, rx) = mpsc::channel();
     let started = Instant::now();
     let opened = open(device.as_deref())?;
     let open_took = started.elapsed();
-    opened.recorder.start(ProbeSink::with_ready(tx)).map_err(Error::from)?;
+    opened
+        .recorder
+        .start(ProbeSink::with_ready(tx))
+        .map_err(Error::from)?;
     let outcome = match rx.recv_timeout(Duration::from_secs(20)) {
         Ok(_) => {
             let first = started.elapsed();
-            Outcome::Pass(format!("open took {open_took:?}; first audio {first:?} after open began (NoAudio bound: 10 s)"))
+            Outcome::Pass(format!(
+                "open took {open_took:?}; first audio {first:?} after open began (NoAudio bound: 10 s)"
+            ))
         }
         Err(_) => match opened.failures.try_recv() {
             Ok((_, e)) => Outcome::Fail(format!("no audio; recorder failed: {e}")),
@@ -578,13 +728,21 @@ fn probe_disconnect_recording(opts: &Opts) -> Result<Outcome, Error> {
     let opened = open(device.as_deref())?;
     let name = opened.recorder.info().device.name.clone();
     let (tx, rx) = mpsc::channel();
-    opened.recorder.start(ProbeSink::with_ready(tx)).map_err(Error::from)?;
+    opened
+        .recorder
+        .start(ProbeSink::with_ready(tx))
+        .map_err(Error::from)?;
     if rx.recv_timeout(Duration::from_secs(15)).is_err() {
         return Ok(Outcome::Fail("no audio before the disconnect".into()));
     }
     thread::sleep(Duration::from_secs(1));
-    say!("\n>>> Disconnect {name} NOW (unplug it, turn it off, put AirPods in their case, or disable it in the system's sound settings).");
-    say!("    Waiting up to {} s for the recorder to report it...", ACTION_WAIT.as_secs());
+    say!(
+        "\n>>> Disconnect {name} NOW (unplug it, turn it off, put AirPods in their case, or disable it in the system's sound settings)."
+    );
+    say!(
+        "    Waiting up to {} s for the recorder to report it...",
+        ACTION_WAIT.as_secs()
+    );
     let asked = Instant::now();
     let failure = opened.failures.recv_timeout(ACTION_WAIT).ok();
     let stop_started = Instant::now();
@@ -605,7 +763,10 @@ fn probe_disconnect_recording(opts: &Opts) -> Result<Outcome, Error> {
             ACTION_WAIT.as_secs()
         )));
     };
-    say!("  reported {:.1} s after the prompt: {error}", (at - asked).as_secs_f64());
+    say!(
+        "  reported {:.1} s after the prompt: {error}",
+        (at - asked).as_secs_f64()
+    );
     let mut problems = Vec::new();
     if !is_device_failure(error.kind()) {
         problems.push(format!("unexpected kind {:?}", error.kind()));
@@ -617,7 +778,10 @@ fn probe_disconnect_recording(opts: &Opts) -> Result<Outcome, Error> {
         Ok(s) => {
             say!("  stop took {stop_took:?}: {}", s.sink.describe());
             if end_error(s).map(Error::kind) != Some(error.kind()) {
-                problems.push(format!("end reason {:?} does not carry the failure", s.end_reason));
+                problems.push(format!(
+                    "end reason {:?} does not carry the failure",
+                    s.end_reason
+                ));
             }
             if s.sink.frames == 0 {
                 problems.push("no audio kept from before the disconnect".into());
@@ -655,8 +819,13 @@ fn probe_disconnect_idle(opts: &Opts) -> Result<Outcome, Error> {
     if warm.sink.frames == 0 {
         return Ok(Outcome::Fail("no audio before the disconnect".into()));
     }
-    say!("\n>>> Disconnect {name} NOW (unplug, turn off, or disable it). The recorder is open and idle.");
-    say!("    Waiting up to {} s for the recorder to report it...", ACTION_WAIT.as_secs());
+    say!(
+        "\n>>> Disconnect {name} NOW (unplug, turn off, or disable it). The recorder is open and idle."
+    );
+    say!(
+        "    Waiting up to {} s for the recorder to report it...",
+        ACTION_WAIT.as_secs()
+    );
     let asked = Instant::now();
     let Ok((at, error)) = opened.failures.recv_timeout(ACTION_WAIT) else {
         let after = record(&opened, 1.0);
@@ -665,7 +834,10 @@ fn probe_disconnect_idle(opts: &Opts) -> Result<Outcome, Error> {
             after.map(|s| s.sink.describe())
         )));
     };
-    say!("  reported {:.1} s after the prompt: {error}", (at - asked).as_secs_f64());
+    say!(
+        "  reported {:.1} s after the prompt: {error}",
+        (at - asked).as_secs_f64()
+    );
     let start = opened.recorder.start(ProbeSink::new());
     drop(opened);
     let recovery = recover(device.as_deref(), &name);
@@ -675,7 +847,10 @@ fn probe_disconnect_idle(opts: &Opts) -> Result<Outcome, Error> {
             error.kind()
         ))),
         (Ok(()), _) => Ok(Outcome::Fail("start succeeded on a failed recorder".into())),
-        (Err(e), Ok(_)) => Ok(Outcome::Fail(format!("start returned a different error: {}", e.error))),
+        (Err(e), Ok(_)) => Ok(Outcome::Fail(format!(
+            "start returned a different error: {}",
+            e.error
+        ))),
         (_, Err(r)) => Ok(Outcome::Fail(r)),
     }
 }
@@ -687,7 +862,10 @@ fn probe_default_change(_opts: &Opts) -> Result<Outcome, Error> {
     }
     let opened = open(None)?;
     let name = opened.recorder.info().device.name.clone();
-    opened.recorder.start(ProbeSink::new()).map_err(Error::from)?;
+    opened
+        .recorder
+        .start(ProbeSink::new())
+        .map_err(Error::from)?;
     prompt(&format!(
         "Change the system default input away from {name} now ({}), then speak for a few seconds.",
         how("default")
@@ -698,7 +876,10 @@ fn probe_default_change(_opts: &Opts) -> Result<Outcome, Error> {
         .into_iter()
         .find(|d| d.is_default)
         .map(|d| d.name);
-    let audio = stopped.as_ref().map(|s| s.sink.describe()).unwrap_or_else(|e| e.to_string());
+    let audio = stopped
+        .as_ref()
+        .map(|s| s.sink.describe())
+        .unwrap_or_else(|e| e.to_string());
     Ok(Outcome::Info(format!(
         "recorder opened on {name}; default is now {new_default:?}; failure: {}; recording: {audio}",
         failure.map_or("none".into(), |(_, e)| e.to_string())
@@ -709,16 +890,26 @@ fn probe_sleep_wake(opts: &Opts) -> Result<Outcome, Error> {
     let opened = open(opts.device.as_deref())?;
     record(&opened, 1.0)?;
     if opts.recording {
-        opened.recorder.start(ProbeSink::new()).map_err(Error::from)?;
+        opened
+            .recorder
+            .start(ProbeSink::new())
+            .map_err(Error::from)?;
     }
     prompt(&format!(
         "Put the machine to sleep for at least 30 s ({}), wake it, then come back here. The recorder is open{}.",
         how("sleep"),
-        if opts.recording { " and recording" } else { " and idle" }
+        if opts.recording {
+            " and recording"
+        } else {
+            " and idle"
+        }
     ));
     let failure = opened.failures.try_recv().ok();
     let recorded = if opts.recording {
-        opened.recorder.stop().map(|s| (s.sink.describe(), s.end_reason))
+        opened
+            .recorder
+            .stop()
+            .map(|s| (s.sink.describe(), s.end_reason))
     } else {
         record(&opened, 2.0).map(|s| (s.sink.describe(), s.end_reason))
     };
@@ -732,12 +923,19 @@ fn probe_sleep_wake(opts: &Opts) -> Result<Outcome, Error> {
             Ok((detail, reason)) => Ok(Outcome::Fail(format!("{reason:?}; {detail}"))),
             Err(e) => Ok(Outcome::Fail(format!("recording after wake failed: {e}"))),
         },
-        Some((_, e)) if matches!(e.kind(), ErrorKind::Stalled | ErrorKind::NoAudio | ErrorKind::SinkStalled) => {
+        Some((_, e))
+            if matches!(
+                e.kind(),
+                ErrorKind::Stalled | ErrorKind::NoAudio | ErrorKind::SinkStalled
+            ) =>
+        {
             Ok(Outcome::Fail(format!(
                 "watchdog false positive across sleep: {e} (see TODO.md, \"Watchdog false positives\")"
             )))
         }
-        Some((_, e)) => Ok(Outcome::Info(format!("the platform reported a failure across sleep: {e}"))),
+        Some((_, e)) => Ok(Outcome::Info(format!(
+            "the platform reported a failure across sleep: {e}"
+        ))),
     }
 }
 
@@ -745,21 +943,24 @@ fn probe_permission(opts: &Opts) -> Result<Outcome, Error> {
     let status = permission_status();
     say!("permission_status: {status:?}");
     if status != Permission::Denied {
-        prompt(
-            &format!(
-                "To probe denial: revoke microphone access ({}), then rerun this probe. Press Enter to run with the current status anyway.",
-                how("permission")
-            ),
-        );
+        prompt(&format!(
+            "To probe denial: revoke microphone access ({}), then rerun this probe. Press Enter to run with the current status anyway.",
+            how("permission")
+        ));
     }
     match open(opts.device.as_deref()) {
-        Err(e) => Ok(Outcome::Info(format!("status {status:?}; open failed: {e} (kind {:?})", e.kind()))),
+        Err(e) => Ok(Outcome::Info(format!(
+            "status {status:?}; open failed: {e} (kind {:?})",
+            e.kind()
+        ))),
         Ok(opened) => {
             let stopped = record(&opened, 2.0);
             let failure = opened.failures.try_recv().ok().map(|(_, e)| e.to_string());
             Ok(Outcome::Info(format!(
                 "status {status:?}; open succeeded; recording: {}; failure: {failure:?}",
-                stopped.map(|s| s.sink.describe()).unwrap_or_else(|e| e.to_string())
+                stopped
+                    .map(|s| s.sink.describe())
+                    .unwrap_or_else(|e| e.to_string())
             )))
         }
     }
@@ -819,10 +1020,14 @@ fn probe_second_process(opts: &Opts) -> Result<Outcome, Error> {
     opened.recorder.close()?;
     say!("closed here; the other process records on");
 
-    let output = child.wait_with_output().expect("wait for the holding process");
+    let output = child
+        .wait_with_output()
+        .expect("wait for the holding process");
     let text = String::from_utf8_lossy(&output.stdout);
     let Some(line) = text.lines().find(|l| l.starts_with("HOLD ")) else {
-        return Ok(Outcome::Fail(format!("the other process did not finish recording: {text}")));
+        return Ok(Outcome::Fail(format!(
+            "the other process did not finish recording: {text}"
+        )));
     };
     say!("  other process: {line}");
     let field = |name: &str| {
@@ -831,14 +1036,21 @@ fn probe_second_process(opts: &Opts) -> Result<Outcome, Error> {
             .unwrap_or("")
             .to_owned()
     };
-    let per_second: Vec<f32> = field("per_second").split(',').filter_map(|v| v.parse().ok()).collect();
+    let per_second: Vec<f32> = field("per_second")
+        .split(',')
+        .filter_map(|v| v.parse().ok())
+        .collect();
 
     let mut problems = Vec::new();
     match &ours {
         Ok(s) => {
             say!("  this process: {}", s.sink.describe());
             if !s.is_complete() || s.sink.seconds() < 2.7 || s.sink.peak == 0.0 {
-                problems.push(format!("this process: {:?}, {}", s.end_reason, s.sink.describe()));
+                problems.push(format!(
+                    "this process: {:?}, {}",
+                    s.end_reason,
+                    s.sink.describe()
+                ));
             }
         }
         Err(e) => problems.push(format!("this process could not record: {e}")),
@@ -853,10 +1065,15 @@ fn probe_second_process(opts: &Opts) -> Result<Outcome, Error> {
         problems.push("the other process lost audio".into());
     }
     if per_second.contains(&0.0) {
-        problems.push(format!("the other process got digital silence in some seconds: {per_second:?}"));
+        problems.push(format!(
+            "the other process got digital silence in some seconds: {per_second:?}"
+        ));
     }
     Ok(if problems.is_empty() {
-        Outcome::Pass("both processes recorded; the other kept recording after this one opened and closed".into())
+        Outcome::Pass(
+            "both processes recorded; the other kept recording after this one opened and closed"
+                .into(),
+        )
     } else {
         Outcome::Fail(problems.join("; "))
     })
@@ -875,8 +1092,12 @@ fn probe_external_app(opts: &Opts) -> Result<Outcome, Error> {
     let first_failure = opened.failures.try_recv().ok().map(|(_, e)| e.to_string());
     opened.recorder.close()?;
     say!("  here: {}", first.sink.describe());
-    let first_ok = first.is_complete() && first.sink.seconds() > 2.7 && first.sink.peak > 0.0 && first_failure.is_none();
-    let other_ok = ask_yes("Did the other app keep recording normally (no gap, error, or silence)?");
+    let first_ok = first.is_complete()
+        && first.sink.seconds() > 2.7
+        && first.sink.peak > 0.0
+        && first_failure.is_none();
+    let other_ok =
+        ask_yes("Did the other app keep recording normally (no gap, error, or silence)?");
     notes.push(format!(
         "other app first: here {}{}; other app {}",
         if first_ok { "ok" } else { "PROBLEM" },
@@ -887,8 +1108,13 @@ fn probe_external_app(opts: &Opts) -> Result<Outcome, Error> {
 
     // Order 2: this process records first; the other app joins mid-recording.
     let opened = open(opts.device.as_deref())?;
-    opened.recorder.start(ProbeSink::new()).map_err(Error::from)?;
-    prompt("Recording here now. Start the other app recording from the same microphone, let it run a few seconds, then stop it.");
+    opened
+        .recorder
+        .start(ProbeSink::new())
+        .map_err(Error::from)?;
+    prompt(
+        "Recording here now. Start the other app recording from the same microphone, let it run a few seconds, then stop it.",
+    );
     let second = opened.recorder.stop()?;
     let second_failure = opened.failures.try_recv().ok().map(|(_, e)| e.to_string());
     say!("  here: {}", second.sink.describe());
@@ -897,12 +1123,17 @@ fn probe_external_app(opts: &Opts) -> Result<Outcome, Error> {
         .timeline
         .windows(5)
         .any(|w| w.iter().all(|&p| p == 0.0));
-    let second_ok = second.is_complete() && second.sink.peak > 0.0 && second_failure.is_none() && !silent_gap;
+    let second_ok =
+        second.is_complete() && second.sink.peak > 0.0 && second_failure.is_none() && !silent_gap;
     notes.push(format!(
         "this first, other joined: here {}{}{}",
         if second_ok { "ok" } else { "PROBLEM" },
         second_failure.map_or(String::new(), |f| format!(" ({f})")),
-        if silent_gap { " (0.5 s or more of digital silence)" } else { "" }
+        if silent_gap {
+            " (0.5 s or more of digital silence)"
+        } else {
+            ""
+        }
     ));
 
     let summary = notes.join("; ");
@@ -914,7 +1145,11 @@ fn probe_external_app(opts: &Opts) -> Result<Outcome, Error> {
 }
 
 fn level(stopped: &Stopped<ProbeSink>) -> String {
-    format!("{:.1} dBFS, peak {:.4}", stopped.sink.dbfs(), stopped.sink.peak)
+    format!(
+        "{:.1} dBFS, peak {:.4}",
+        stopped.sink.dbfs(),
+        stopped.sink.peak
+    )
 }
 
 fn probe_replug(opts: &Opts) -> Result<Outcome, Error> {
@@ -928,7 +1163,9 @@ fn probe_replug(opts: &Opts) -> Result<Outcome, Error> {
         return Ok(Outcome::Fail("no failure reported on unplug".into()));
     }
     drop(opened);
-    prompt(&format!("Plug {name} back in, wait until macOS shows it, speak or tap near it during the next recordings."));
+    prompt(&format!(
+        "Plug {name} back in, wait until macOS shows it, speak or tap near it during the next recordings."
+    ));
 
     // A fresh process: empty config cache, fresh CoreAudio state.
     let mut child = std::process::Command::new(env::current_exe().expect("own path"));
@@ -960,7 +1197,11 @@ fn probe_replug(opts: &Opts) -> Result<Outcome, Error> {
     Ok(Outcome::Info(format!(
         "before {}; fresh process {}; this process {} ({})",
         level(&before),
-        if fresh_ok { "real audio" } else { "SILENT/failed" },
+        if fresh_ok {
+            "real audio"
+        } else {
+            "SILENT/failed"
+        },
         if here_ok { "real audio" } else { "SILENT" },
         match (fresh_ok, here_ok) {
             (true, false) => "state held in this process: the config cache or CPAL",
@@ -974,7 +1215,11 @@ fn probe_replug(opts: &Opts) -> Result<Outcome, Error> {
 // ---- raw CPAL across sleep --------------------------------------------------
 
 fn utc_clock(t: std::time::SystemTime) -> String {
-    let secs = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() % 86_400;
+    let secs = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        % 86_400;
     format!("{:02}:{:02}:{:02}Z", secs / 3600, secs / 60 % 60, secs % 60)
 }
 
@@ -997,7 +1242,10 @@ fn probe_sleep_raw(opts: &Opts) -> Result<Outcome, Error> {
     let Some(device) = device else {
         return Ok(Outcome::Fail("no such input device".into()));
     };
-    let name = device.description().map(|d| d.name().to_owned()).unwrap_or_default();
+    let name = device
+        .description()
+        .map(|d| d.name().to_owned())
+        .unwrap_or_default();
     let config = match device.default_input_config() {
         Ok(c) => c,
         Err(e) => return Ok(Outcome::Fail(format!("no input config: {e}"))),
@@ -1024,22 +1272,35 @@ fn probe_sleep_raw(opts: &Opts) -> Result<Outcome, Error> {
             config.config(),
             move |data: &[T], _: &cpal::InputCallbackInfo| {
                 callbacks.fetch_add(1, Ordering::Relaxed);
-                let p = data.iter().fold(0.0f32, |m, &s| m.max(s.to_sample::<f32>().abs()));
+                let p = data
+                    .iter()
+                    .fold(0.0f32, |m, &s| m.max(s.to_sample::<f32>().abs()));
                 peak.fetch_max(p.to_bits(), Ordering::Relaxed);
             },
             move |e: cpal::Error| {
-                errors.lock().unwrap().push((SystemTime::now(), format!("{:?}: {e}", e.kind())));
+                errors
+                    .lock()
+                    .unwrap()
+                    .push((SystemTime::now(), format!("{:?}: {e}", e.kind())));
             },
             None,
         )
     }
-    let (c, p, e) = (Arc::clone(&callbacks), Arc::clone(&peak), Arc::clone(&errors));
+    let (c, p, e) = (
+        Arc::clone(&callbacks),
+        Arc::clone(&peak),
+        Arc::clone(&errors),
+    );
     let stream = match config.sample_format() {
         cpal::SampleFormat::F32 => build::<f32>(&device, &config, c, p, e),
         cpal::SampleFormat::I16 => build::<i16>(&device, &config, c, p, e),
         cpal::SampleFormat::I32 => build::<i32>(&device, &config, c, p, e),
         cpal::SampleFormat::U8 => build::<u8>(&device, &config, c, p, e),
-        other => return Ok(Outcome::Fail(format!("unsupported sample format {other:?}"))),
+        other => {
+            return Ok(Outcome::Fail(format!(
+                "unsupported sample format {other:?}"
+            )));
+        }
     };
     let stream = match stream {
         Ok(s) => s,
@@ -1055,7 +1316,8 @@ fn probe_sleep_raw(opts: &Opts) -> Result<Outcome, Error> {
     let done = Arc::new(AtomicBool::new(false));
     let gaps: Arc<Mutex<Vec<String>>> = Arc::default();
     let monitor = {
-        let (callbacks, done, gaps) = (Arc::clone(&callbacks), Arc::clone(&done), Arc::clone(&gaps));
+        let (callbacks, done, gaps) =
+            (Arc::clone(&callbacks), Arc::clone(&done), Arc::clone(&gaps));
         thread::spawn(move || {
             let mut last = callbacks.load(Ordering::Relaxed);
             let mut last_change = (SystemTime::now(), Instant::now());
@@ -1063,7 +1325,9 @@ fn probe_sleep_raw(opts: &Opts) -> Result<Outcome, Error> {
                 thread::sleep(Duration::from_millis(50));
                 let now = callbacks.load(Ordering::Relaxed);
                 if now != last {
-                    let wall = SystemTime::now().duration_since(last_change.0).unwrap_or_default();
+                    let wall = SystemTime::now()
+                        .duration_since(last_change.0)
+                        .unwrap_or_default();
                     let uptime = last_change.1.elapsed();
                     if wall >= Duration::from_millis(500) {
                         let line = format!(
@@ -1125,7 +1389,10 @@ fn probe_sleep_raw(opts: &Opts) -> Result<Outcome, Error> {
 fn probe_service_restart(opts: &Opts) -> Result<Outcome, Error> {
     let opened = open(opts.device.as_deref())?;
     let (tx, rx) = mpsc::channel();
-    opened.recorder.start(ProbeSink::with_ready(tx)).map_err(Error::from)?;
+    opened
+        .recorder
+        .start(ProbeSink::with_ready(tx))
+        .map_err(Error::from)?;
     if rx.recv_timeout(Duration::from_secs(15)).is_err() {
         return Ok(Outcome::Fail("no audio before the restart".into()));
     }
@@ -1133,13 +1400,21 @@ fn probe_service_restart(opts: &Opts) -> Result<Outcome, Error> {
         "Restart the audio service now ({}). Wait until it is back (a few seconds), speak, then come back here.",
         how("service")
     ));
-    let failure = opened.failures.recv_timeout(Duration::from_secs(5)).ok().map(|(_, e)| e);
+    let failure = opened
+        .failures
+        .recv_timeout(Duration::from_secs(5))
+        .ok()
+        .map(|(_, e)| e);
     let stopped = opened.recorder.stop();
     let mut notes = Vec::new();
     let mut problems = Vec::new();
     match (&failure, &stopped) {
         (Some(e), Ok(s)) => {
-            notes.push(format!("reported {:?}: {e}; kept {}", e.kind(), s.sink.describe()));
+            notes.push(format!(
+                "reported {:?}: {e}; kept {}",
+                e.kind(),
+                s.sink.describe()
+            ));
             if end_error(s).is_none() {
                 problems.push("the recording's end reason does not carry the failure".into());
             }
@@ -1151,7 +1426,8 @@ fn probe_service_restart(opts: &Opts) -> Result<Outcome, Error> {
                 s.sink.describe()
             ));
             if silent >= 1.0 {
-                problems.push("stale stream: no failure, and digital silence after the restart".into());
+                problems
+                    .push("stale stream: no failure, and digital silence after the restart".into());
             }
         }
         (_, Err(e)) => problems.push(format!("stop failed: {e}")),
@@ -1178,7 +1454,11 @@ fn probe_service_restart(opts: &Opts) -> Result<Outcome, Error> {
             Ok(s) if s.is_complete() && s.sink.peak > 0.0 => {
                 notes.push(format!("reopened in this process: {}", s.sink.describe()))
             }
-            Ok(s) => problems.push(format!("reopened, but: {:?}, {}", s.end_reason, s.sink.describe())),
+            Ok(s) => problems.push(format!(
+                "reopened, but: {:?}, {}",
+                s.end_reason,
+                s.sink.describe()
+            )),
             Err(e) => problems.push(format!("reopened, but recording failed: {e}")),
         }
     }
@@ -1198,23 +1478,40 @@ fn probe_service_restart(opts: &Opts) -> Result<Outcome, Error> {
 /// a working stream.
 fn probe_bluetooth_handoff(opts: &Opts) -> Result<Outcome, Error> {
     let device = choose_device(opts, "choose the Bluetooth headset")?;
-    prompt("Make sure the headset is connected to this computer and worn (play a moment of audio here if needed).");
+    prompt(
+        "Make sure the headset is connected to this computer and worn (play a moment of audio here if needed).",
+    );
     let opened = open(device.as_deref())?;
     let name = opened.recorder.info().device.name.clone();
     let (tx, rx) = mpsc::channel();
-    opened.recorder.start(ProbeSink::with_ready(tx)).map_err(Error::from)?;
+    opened
+        .recorder
+        .start(ProbeSink::with_ready(tx))
+        .map_err(Error::from)?;
     if rx.recv_timeout(Duration::from_secs(15)).is_err() {
         return Ok(Outcome::Fail("no audio before the handoff".into()));
     }
-    say!("\n>>> Move {name} to your phone NOW (play something on the phone, or pick it there), keep speaking.");
-    say!("    Waiting up to {} s for the recorder to report it...", ACTION_WAIT.as_secs());
+    say!(
+        "\n>>> Move {name} to your phone NOW (play something on the phone, or pick it there), keep speaking."
+    );
+    say!(
+        "    Waiting up to {} s for the recorder to report it...",
+        ACTION_WAIT.as_secs()
+    );
     let asked = Instant::now();
     let failure = opened.failures.recv_timeout(ACTION_WAIT).ok();
     let stopped = opened.recorder.stop();
     let first = match (&failure, &stopped) {
         (Some((at, e)), _) => {
-            say!("  reported {:.1} s after the prompt: {e}", (*at - asked).as_secs_f64());
-            format!("handoff reported as {:?} after {:.1} s", e.kind(), (*at - asked).as_secs_f64())
+            say!(
+                "  reported {:.1} s after the prompt: {e}",
+                (*at - asked).as_secs_f64()
+            );
+            format!(
+                "handoff reported as {:?} after {:.1} s",
+                e.kind(),
+                (*at - asked).as_secs_f64()
+            )
         }
         (None, Ok(s)) => {
             let silent = s.sink.trailing_zero_seconds();
@@ -1238,8 +1535,12 @@ fn probe_bluetooth_handoff(opts: &Opts) -> Result<Outcome, Error> {
         "Bring {name} back to this computer (select it in the menu bar / sound settings), then continue."
     ));
     match recover_quietly(device.as_deref()) {
-        Ok(r) => Ok(Outcome::Info(format!("{first}; back on this computer: {r}"))),
-        Err(r) => Ok(Outcome::Fail(format!("{first}; after bringing it back: {r}"))),
+        Ok(r) => Ok(Outcome::Info(format!(
+            "{first}; back on this computer: {r}"
+        ))),
+        Err(r) => Ok(Outcome::Fail(format!(
+            "{first}; after bringing it back: {r}"
+        ))),
     }
 }
 
@@ -1260,6 +1561,10 @@ fn recover_quietly(device: Option<&str>) -> Result<String, String> {
     if stopped.is_complete() && stopped.sink.peak > 0.0 {
         Ok(stopped.sink.describe())
     } else {
-        Err(format!("{:?}, {}", stopped.end_reason, stopped.sink.describe()))
+        Err(format!(
+            "{:?}, {}",
+            stopped.end_reason,
+            stopped.sink.describe()
+        ))
     }
 }

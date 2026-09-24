@@ -12,7 +12,10 @@ fn main() -> Result<(), handy_recorder::Error> {
     for d in list_input_devices()? {
         let mark = if d.is_default { "*" } else { " " };
         let channels = d.channels.map_or("?".into(), |c| c.to_string());
-        println!("{mark} {} [{}] {channels} ch  id={}", d.name, d.backend, d.id);
+        println!(
+            "{mark} {} [{}] {channels} ch  id={}",
+            d.name, d.backend, d.id
+        );
     }
     Ok(())
 }

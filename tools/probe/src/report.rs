@@ -35,7 +35,11 @@ pub fn append(text: &str) {
 pub fn start(probe: &str) -> Option<PathBuf> {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("results");
     let _ = fs::create_dir_all(&dir);
-    let path = dir.join(format!("{}-{}-{probe}.txt", timestamp(true), std::env::consts::OS));
+    let path = dir.join(format!(
+        "{}-{}-{probe}.txt",
+        timestamp(true),
+        std::env::consts::OS
+    ));
     let file = File::create(&path).ok()?;
     let _ = FILE.set(Mutex::new(file));
     Some(path)
@@ -78,7 +82,9 @@ impl log::Log for Logger {
 
 /// UTC, as `20260924-051822` (for file names) or `05:18:22.123Z`.
 pub fn timestamp(for_file: bool) -> String {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = now.as_secs();
     let (y, m, d) = civil_from_days((secs / 86_400) as i64);
     let (hh, mm, ss) = (secs / 3600 % 24, secs / 60 % 60, secs % 60);
@@ -115,11 +121,7 @@ fn command(program: &str, args: &[&str]) -> Option<String> {
 pub fn machine() -> Vec<String> {
     let mut lines = vec![
         format!("time: {}", timestamp(false)),
-        format!(
-            "os: {} {}",
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        ),
+        format!("os: {} {}", std::env::consts::OS, std::env::consts::ARCH),
         format!("handy-recorder commit: {}", env!("PROBE_GIT_COMMIT")),
     ];
     match std::env::consts::OS {
@@ -148,13 +150,15 @@ pub fn machine() -> Vec<String> {
             match command("pactl", &["info"]) {
                 Some(info) => {
                     for line in info.lines().filter(|l| {
-                        l.starts_with("Server Name") || l.starts_with("Server Version")
+                        l.starts_with("Server Name")
+                            || l.starts_with("Server Version")
                             || l.starts_with("Default Source")
                     }) {
                         lines.push(format!("sound server: {line}"));
                     }
                 }
-                None => lines.push("sound server: pactl unavailable (no PulseAudio/pipewire-pulse?)".into()),
+                None => lines
+                    .push("sound server: pactl unavailable (no PulseAudio/pipewire-pulse?)".into()),
             }
         }
         _ => {}

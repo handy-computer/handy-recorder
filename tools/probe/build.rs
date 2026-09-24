@@ -13,11 +13,15 @@ fn git(args: &[&str]) -> Option<String> {
 
 fn main() {
     let commit = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".into());
-    let dirty = git(&["status", "--porcelain", "--untracked-files=no"])
-        .is_some_and(|s| !s.is_empty());
+    let dirty =
+        git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|s| !s.is_empty());
     println!(
         "cargo:rustc-env=PROBE_GIT_COMMIT={commit}{}",
-        if dirty { " (with uncommitted changes)" } else { "" }
+        if dirty {
+            " (with uncommitted changes)"
+        } else {
+            ""
+        }
     );
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/index");

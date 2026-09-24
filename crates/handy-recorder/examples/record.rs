@@ -10,7 +10,10 @@ fn main() -> Result<(), handy_recorder::Error> {
         // Runs on a library thread the moment the mic fails.
         eprintln!("microphone failed: {error}");
     })?;
-    println!("recording from {} for 5 seconds...", recorder.info().device.name);
+    println!(
+        "recording from {} for 5 seconds...",
+        recorder.info().device.name
+    );
 
     recorder.start(CollectingSink::new())?;
     std::thread::sleep(Duration::from_secs(5));
