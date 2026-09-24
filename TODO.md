@@ -111,9 +111,12 @@ Location: `backend/cpal.rs` (`map_error`), `capture/engine.rs` (`open_stream`).
 - `Processing` failures: the fake backend cannot make Rubato fail, so the
   path from a resampler error to a failed recorder is covered only by
   reading. A test hook that injects a resampler error would cover it.
-- Real hardware: device loss, stream invalidation, and the watchdog have
-  only run against the fake. The tier-3 probes (`tools/probe/`) are not
-  written yet.
+- Real hardware: device loss, stream invalidation, default-device changes,
+  sleep/wake, and slow Bluetooth start have only run against the fake. The
+  tier-3 probes exist outside this repository for now
+  (`../handy-recorder-probe`); the non-interactive ones pass on macOS,
+  including a real `SinkStalled` trip. The interactive ones need a
+  hardware session. DESIGN.md places them at `tools/probe/`.
 - Windows and Linux compile (Linux type-checked with a stub `alsa.pc`)
   but have not run. Tier-2 virtual-device tests (PulseAudio and
   pipewire-pulse null sources) are not written; they need a Linux machine
