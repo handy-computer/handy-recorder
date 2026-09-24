@@ -3,8 +3,9 @@
 //! construction, the pause handshake, the consumer loop, and the resampler.
 //!
 //! Kept close to Handy's source so it can be diffed against it. Removed: VAD,
-//! the level visualizer, and Tauri wiring, which stay in Handy. Changed only
-//! where CPAL 0.18 required it. Handy's behavior is otherwise unchanged,
+//! the level visualizer, and Tauri wiring, which stay in Handy. Platform
+//! access (device selection, preferred format, CPAL stream construction)
+//! moved behind the backend seam in `crate::backend`. Handy's behavior is otherwise unchanged,
 //! including the parts the design replaces later (see DESIGN.md, "Extraction
 //! from Handy").
 
@@ -16,13 +17,6 @@ mod resampler;
 #[allow(unused_imports)]
 pub(crate) use recorder::{AudioRecorder, is_microphone_access_denied, is_no_input_device_error};
 pub(crate) use resampler::FrameResampler;
-
-/// Handy forces the ALSA host on Linux. The library targets the native
-/// PulseAudio host there (with ALSA fallback), which `default_host` selects
-/// when the `pulseaudio` feature is enabled and a server is running.
-pub(crate) fn get_cpal_host() -> cpal::Host {
-    cpal::default_host()
-}
 
 #[cfg(test)]
 mod smoke {

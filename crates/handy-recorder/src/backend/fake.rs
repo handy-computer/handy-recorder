@@ -1,0 +1,142 @@
+//! A deterministic backend for tests. The test thread plays the platform's
+//! audio thread: [`FakeBackend::push`] calls the running stream's data
+//! callback directly, so a test decides exactly when every block arrives.
+
+use std::sync::{Arc, Mutex};
+
+use super::{
+    Backend, BackendError, BackendErrorKind, DataCallback, DeviceFormat, ErrorCallback,
+    InputSample, InputStream, OpenDevice,
+};
+use crate::InputDevice;
+
+/// One fake device. Clones share state, so a test keeps a clone to drive the
+/// stream a recorder opened.
+#[derive(Clone)]
+pub(crate) struct FakeBackend {
+    shared: Arc<Shared>,
+}
+
+struct Shared {
+    device: InputDevice,
+    format: DeviceFormat,
+    state: Mutex<State>,
+}
+
+#[derive(Default)]
+struct State {
+    /// The running stream's callbacks. `None` when no stream is running.
+    stream: Option<(DataCallback, ErrorCallback)>,
+    next_open_error: Option<BackendError>,
+    streams_started: usize,
+}
+
+impl FakeBackend {
+    pub fn new(format: DeviceFormat) -> Self {
+        Self {
+            shared: Arc::new(Shared {
+                device: InputDevice {
+                    id: "fake:mic".into(),
+                    name: "Fake Mic".into(),
+                    occurrence: 0,
+                    backend: "Fake".into(),
+                    is_default: true,
+                    id_is_stable: true,
+                },
+                format,
+                state: Mutex::default(),
+            }),
+        }
+    }
+
+    /// Delivers one callback block to the running stream, on this thread.
+    /// Returns false if no stream is running.
+    pub fn push<T: InputSample>(&self, samples: &[T]) -> bool {
+        match &mut self.shared.state.lock().unwrap().stream {
+            Some((data, _)) => {
+                data(T::wrap(samples));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Reports a stream error, as the platform's error callback would.
+    /// Returns false if no stream is running.
+    pub fn report_error(&self, error: BackendError) -> bool {
+        match &mut self.shared.state.lock().unwrap().stream {
+            Some((_, report)) => {
+                report(error);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Makes the next `open_device` fail with `error`.
+    pub fn fail_next_open(&self, error: BackendError) {
+        self.shared.state.lock().unwrap().next_open_error = Some(error);
+    }
+
+    pub fn is_streaming(&self) -> bool {
+        self.shared.state.lock().unwrap().stream.is_some()
+    }
+
+    pub fn streams_started(&self) -> usize {
+        self.shared.state.lock().unwrap().streams_started
+    }
+}
+
+impl Backend for FakeBackend {
+    fn list_input_devices(&self) -> Result<Vec<InputDevice>, BackendError> {
+        Ok(vec![self.shared.device.clone()])
+    }
+
+    fn open_device(&self, id: Option<&str>) -> Result<Box<dyn OpenDevice>, BackendError> {
+        if let Some(error) = self.shared.state.lock().unwrap().next_open_error.take() {
+            return Err(error);
+        }
+        if id.is_some_and(|id| id != self.shared.device.id) {
+            return Err(BackendError::new(
+                BackendErrorKind::DeviceNotAvailable,
+                format!("No input device with ID {id:?}"),
+            ));
+        }
+        Ok(Box::new(FakeOpenDevice(self.clone())))
+    }
+}
+
+struct FakeOpenDevice(FakeBackend);
+
+impl OpenDevice for FakeOpenDevice {
+    fn info(&self) -> &InputDevice {
+        &self.0.shared.device
+    }
+
+    fn format(&self) -> DeviceFormat {
+        self.0.shared.format
+    }
+
+    fn start(
+        self: Box<Self>,
+        data: DataCallback,
+        error: ErrorCallback,
+    ) -> Result<Box<dyn InputStream>, BackendError> {
+        let mut state = self.0.shared.state.lock().unwrap();
+        assert!(state.stream.is_none(), "the fake runs one stream at a time");
+        state.stream = Some((data, error));
+        state.streams_started += 1;
+        drop(state);
+        Ok(Box::new(FakeStream(self.0)))
+    }
+}
+
+struct FakeStream(FakeBackend);
+
+impl InputStream for FakeStream {}
+
+impl Drop for FakeStream {
+    fn drop(&mut self) {
+        self.0.shared.state.lock().unwrap().stream = None;
+    }
+}

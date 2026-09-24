@@ -2,18 +2,18 @@ use std::{
     io::Error,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc, Arc,
     },
     time::{Duration, Instant},
 };
 
-use cpal::{
-    traits::{DeviceTrait, HostTrait, StreamTrait},
-    Device, Sample, SizedSample,
-};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use super::FrameResampler;
+use crate::backend::{
+    cpal::CpalBackend, Backend, BackendError, InputData, InputSample, InputStream, OpenDevice,
+};
+use crate::InputDevice;
 
 /// Handy's `constants::WHISPER_SAMPLE_RATE`: the rate every frame is resampled to.
 const OUTPUT_SAMPLE_RATE: u32 = 16000;
@@ -48,17 +48,26 @@ struct CaptureTransportState {
     /// sent just after it).
     #[cfg(test)]
     starts_applied: std::sync::atomic::AtomicUsize,
+    /// Test-only: samples drained outside a stop (a stop always empties the
+    /// ring), so a test can wait until idle audio has been discarded.
+    #[cfg(test)]
+    frames_drained: std::sync::atomic::AtomicUsize,
 }
 
 /// Callback invoked with each 16 kHz mono frame while recording. Used to feed
 /// a live streaming transcription as audio arrives.
 pub type AudioFrameCallback = Arc<dyn Fn(&[f32]) + Send + Sync + 'static>;
 
+/// What the worker builds before running the consumer: the stream, the
+/// device it opened, the device rate, and the ring's read side.
+type OpenedStream = (Box<dyn InputStream>, InputDevice, u32, Consumer<f32>);
+
 /// Handy's frame size when no VAD is attached: 30 ms at 16 kHz.
 const DEFAULT_FRAME_SAMPLES: usize = (OUTPUT_SAMPLE_RATE * 30 / 1000) as usize;
 
 pub struct AudioRecorder {
-    device: Option<Device>,
+    backend: Arc<dyn Backend>,
+    device: Option<InputDevice>,
     cmd_tx: Option<mpsc::Sender<Cmd>>,
     worker_handle: Option<std::thread::JoinHandle<()>>,
     /// Samples per emitted 16 kHz frame. Handy sizes frames for its VAD
@@ -67,29 +76,32 @@ pub struct AudioRecorder {
     audio_cb: Option<AudioFrameCallback>,
     /// Which input channel to use. None = average all (original behavior).
     selected_channel: Option<usize>,
-    /// Preferred stream config cached per device. The two HAL property
-    /// queries in `get_preferred_config` cost ~40-85ms per open (worse on
-    /// USB/Bluetooth), which lands on the keypress->capture path in on-demand
-    /// mode. Keyed by device ID so a system-default change misses naturally;
-    /// cleared whenever an open fails so a stale rate/format self-heals on the
-    /// caller's retry.
-    config_cache: Arc<Mutex<Option<(cpal::DeviceId, cpal::SupportedStreamConfig)>>>,
-    /// Set by cpal when the active input stream can no longer capture.
+    /// Set by the backend when the active input stream can no longer capture.
     stream_error: Arc<AtomicBool>,
+    /// Test-only: the open stream's transport, so tests can follow the
+    /// consumer through Start and the stop handshake.
+    #[cfg(test)]
+    transport: Option<Arc<CaptureTransportState>>,
 }
 
 impl AudioRecorder {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        Ok(AudioRecorder {
+        Ok(Self::with_backend(Arc::new(CpalBackend::new())))
+    }
+
+    pub(crate) fn with_backend(backend: Arc<dyn Backend>) -> Self {
+        AudioRecorder {
+            backend,
             device: None,
             cmd_tx: None,
             worker_handle: None,
             frame_samples: DEFAULT_FRAME_SAMPLES,
             audio_cb: None,
             selected_channel: None,
-            config_cache: Arc::new(Mutex::new(None)),
             stream_error: Arc::new(AtomicBool::new(false)),
-        })
+            #[cfg(test)]
+            transport: None,
+        }
     }
 
     /// Size of each emitted 16 kHz frame, in samples. Replaces Handy's
@@ -121,7 +133,9 @@ impl AudioRecorder {
         self.selected_channel = channel.map(usize::from);
     }
 
-    pub fn open(&mut self, device: Option<Device>) -> Result<(), Box<dyn std::error::Error>> {
+    /// Opens `device` (an `InputDevice::id`), or the system default for
+    /// `None`. Handy takes a `cpal::Device` here.
+    pub fn open(&mut self, device: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         if self.worker_handle.is_some() {
             if !self.needs_reopen() {
                 return Ok(()); // already open
@@ -133,52 +147,35 @@ impl AudioRecorder {
         self.stream_error.store(false, Ordering::Relaxed);
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
-        let (init_tx, init_rx) = mpsc::sync_channel::<Result<(), String>>(1);
+        let (init_tx, init_rx) = mpsc::sync_channel::<Result<InputDevice, String>>(1);
 
-        let host = super::get_cpal_host();
-        let device = match device {
-            Some(dev) => dev,
-            None => host
-                .default_input_device()
-                .ok_or_else(|| Error::new(std::io::ErrorKind::NotFound, "No input device found"))?,
-        };
-
-        let thread_device = device.clone();
+        let backend = Arc::clone(&self.backend);
+        let device_id = device.map(str::to_owned);
         let frame_samples = self.frame_samples;
         // Move the optional real-time audio frame callback into the worker thread
         let audio_cb = self.audio_cb.clone();
         let selected_channel = self.selected_channel;
-        let config_cache = Arc::clone(&self.config_cache);
         let stream_error = Arc::clone(&self.stream_error);
+        let transport = Arc::new(CaptureTransportState::default());
+        let worker_transport = Arc::clone(&transport);
 
         let worker = std::thread::spawn(move || {
-            let transport = Arc::new(CaptureTransportState::default());
-            let init_result = (|| -> Result<(cpal::Stream, u32, Consumer<f32>), String> {
-                let config_started = Instant::now();
-                let device_id = thread_device.id().ok();
-                let cached_config = config_cache
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .filter(|(id, _)| device_id.as_ref() == Some(id))
-                    .map(|(_, cfg)| *cfg);
-                let config_was_cached = cached_config.is_some();
-                let config = match cached_config {
-                    Some(cfg) => cfg,
-                    None => AudioRecorder::get_preferred_config(&thread_device)
-                        .map_err(|e| format!("Failed to fetch preferred config: {e}"))?,
-                };
-                let config_elapsed = config_started.elapsed();
-
-                let sample_rate = config.sample_rate();
-                let channels = config.channels() as usize;
+            let transport = worker_transport;
+            let init_result = (|| -> Result<OpenedStream, String> {
+                let device = backend
+                    .open_device(device_id.as_deref())
+                    .map_err(|e| e.to_string())?;
+                let info = device.info().clone();
+                let format = device.format();
+                let sample_rate = format.sample_rate;
+                let channels = format.channels as usize;
 
                 log::info!(
                     "Using device: {:?}\nSample rate: {}\nChannels: {}\nFormat: {:?}",
-                    thread_device.description().map(|d| d.name().to_owned()),
+                    info.name,
                     sample_rate,
                     channels,
-                    config.sample_format()
+                    format.sample_format
                 );
 
                 if let Some(channel) = selected_channel {
@@ -195,79 +192,21 @@ impl AudioRecorder {
                     log::info!("Averaging all {} input channels", channels);
                 }
 
-                let build_started = Instant::now();
-                let (stream, sample_consumer) = match config.sample_format() {
-                    cpal::SampleFormat::U8 => AudioRecorder::build_stream::<u8>(
-                        &thread_device,
-                        &config,
-                        channels,
-                        selected_channel,
-                        Arc::clone(&transport),
-                        Arc::clone(&stream_error),
-                    ),
-                    cpal::SampleFormat::I8 => AudioRecorder::build_stream::<i8>(
-                        &thread_device,
-                        &config,
-                        channels,
-                        selected_channel,
-                        Arc::clone(&transport),
-                        Arc::clone(&stream_error),
-                    ),
-                    cpal::SampleFormat::I16 => AudioRecorder::build_stream::<i16>(
-                        &thread_device,
-                        &config,
-                        channels,
-                        selected_channel,
-                        Arc::clone(&transport),
-                        Arc::clone(&stream_error),
-                    ),
-                    cpal::SampleFormat::I32 => AudioRecorder::build_stream::<i32>(
-                        &thread_device,
-                        &config,
-                        channels,
-                        selected_channel,
-                        Arc::clone(&transport),
-                        Arc::clone(&stream_error),
-                    ),
-                    cpal::SampleFormat::F32 => AudioRecorder::build_stream::<f32>(
-                        &thread_device,
-                        &config,
-                        channels,
-                        selected_channel,
-                        Arc::clone(&transport),
-                        Arc::clone(&stream_error),
-                    ),
-                    sample_format => {
-                        return Err(format!("Unsupported sample format: {sample_format:?}"));
-                    }
-                }
-                .map_err(|e| format!("Failed to build input stream: {e}"))?;
-                let build_elapsed = build_started.elapsed();
+                let (stream, sample_consumer) = AudioRecorder::build_stream(
+                    device,
+                    channels,
+                    selected_channel,
+                    Arc::clone(&transport),
+                    Arc::clone(&stream_error),
+                )
+                .map_err(|e| e.to_string())?;
 
-                let play_started = Instant::now();
-                stream
-                    .play()
-                    .map_err(|e| format!("Failed to start microphone stream: {e}"))?;
-                log::debug!(
-                    "mic worker init: fetch_config={:?} (cached={}) build_stream={:?} play={:?}",
-                    config_elapsed,
-                    config_was_cached,
-                    build_elapsed,
-                    play_started.elapsed()
-                );
-
-                // The device accepted this config; remember it so the next
-                // open skips the HAL property queries entirely.
-                if !config_was_cached && let Some(device_id) = device_id {
-                    *config_cache.lock().unwrap() = Some((device_id, config));
-                }
-
-                Ok((stream, sample_rate, sample_consumer))
+                Ok((stream, info, sample_rate, sample_consumer))
             })();
 
             match init_result {
-                Ok((stream, sample_rate, sample_consumer)) => {
-                    let _ = init_tx.send(Ok(()));
+                Ok((stream, info, sample_rate, sample_consumer)) => {
+                    let _ = init_tx.send(Ok(info));
                     // Timestamp for the play()-returned -> first-samples gap the
                     // init handshake can't see (hardware dependent).
                     let stream_running_at = Instant::now();
@@ -287,10 +226,6 @@ impl AudioRecorder {
                     drop(stream);
                 }
                 Err(error_message) => {
-                    // A failed open may mean the cached config went stale
-                    // (device re-plugged, rate/format changed in the OS).
-                    // Drop it so the next attempt re-queries the device.
-                    *config_cache.lock().unwrap() = None;
                     log::error!("{error_message}");
                     let _ = init_tx.send(Err(error_message));
                 }
@@ -298,10 +233,14 @@ impl AudioRecorder {
         });
 
         match init_rx.recv() {
-            Ok(Ok(())) => {
+            Ok(Ok(device)) => {
                 self.device = Some(device);
                 self.cmd_tx = Some(cmd_tx);
                 self.worker_handle = Some(worker);
+                #[cfg(test)]
+                {
+                    self.transport = Some(transport);
+                }
                 Ok(())
             }
             Ok(Err(error_message)) => {
@@ -369,19 +308,14 @@ impl AudioRecorder {
         Ok(())
     }
 
-    fn build_stream<T>(
-        device: &cpal::Device,
-        config: &cpal::SupportedStreamConfig,
+    fn build_stream(
+        device: Box<dyn OpenDevice>,
         channels: usize,
         selected_channel: Option<usize>,
         transport: Arc<CaptureTransportState>,
         stream_error: Arc<AtomicBool>,
-    ) -> Result<(cpal::Stream, Consumer<f32>), cpal::Error>
-    where
-        T: Sample + SizedSample + Copy + Send + 'static,
-        f32: cpal::FromSample<T>,
-    {
-        let ring_capacity = config.sample_rate() as usize * AUDIO_RING_SECONDS;
+    ) -> Result<(Box<dyn InputStream>, Consumer<f32>), BackendError> {
+        let ring_capacity = device.format().sample_rate as usize * AUDIO_RING_SECONDS;
         let (mut sample_producer, mut sample_consumer) = RingBuffer::new(ring_capacity);
 
         // Touch rtrb's uninitialized pages before the stream starts to reduce
@@ -403,25 +337,25 @@ impl AudioRecorder {
         // out of range for this device, fall back to averaging all channels.
         let use_channel = selected_channel.filter(|&channel| channel < channels);
         let callback_transport = Arc::clone(&transport);
-        let stream_cb = move |data: &[T], _: &cpal::InputCallbackInfo| {
-            Self::write_input_to_ring(
-                data,
-                channels,
-                use_channel,
-                &mut sample_producer,
-                &callback_transport,
-            );
+        let write = move |data: InputData<'_>| {
+            let producer = &mut sample_producer;
+            let transport = &callback_transport;
+            match data {
+                InputData::U8(d) => Self::write_input_to_ring(d, channels, use_channel, producer, transport),
+                InputData::I8(d) => Self::write_input_to_ring(d, channels, use_channel, producer, transport),
+                InputData::I16(d) => Self::write_input_to_ring(d, channels, use_channel, producer, transport),
+                InputData::I32(d) => Self::write_input_to_ring(d, channels, use_channel, producer, transport),
+                InputData::F32(d) => Self::write_input_to_ring(d, channels, use_channel, producer, transport),
+            }
         };
 
-        let stream = device.build_input_stream(
-            config.config(),
-            stream_cb,
-            move |_err: cpal::Error| {
+        let stream = device.start(
+            Box::new(write),
+            Box::new(move |_err: BackendError| {
                 // Error callbacks may share the platform audio thread. Defer
                 // logging and recovery to the consumer/manager path.
                 stream_error.store(true, Ordering::Release);
-            },
-            None,
+            }),
         )?;
         Ok((stream, sample_consumer))
     }
@@ -435,8 +369,7 @@ impl AudioRecorder {
         producer: &mut Producer<f32>,
         transport: &CaptureTransportState,
     ) where
-        T: Sample + SizedSample + Copy,
-        f32: cpal::FromSample<T>,
+        T: InputSample,
     {
         // Forward the first block that observes a pause; once acknowledged,
         // remain silent until the consumer resumes capture.
@@ -458,20 +391,20 @@ impl AudioRecorder {
                 chunk.fill_from_iter(
                     data.iter()
                         .take(writable_frames)
-                        .map(|&sample| sample.to_sample::<f32>()),
+                        .map(|&sample| sample.to_f32()),
                 )
             } else if let Some(channel) = use_channel {
                 chunk.fill_from_iter(
                     data.chunks_exact(channels)
                         .take(writable_frames)
-                        .map(|frame| frame[channel].to_sample::<f32>()),
+                        .map(|frame| frame[channel].to_f32()),
                 )
             } else {
                 chunk.fill_from_iter(data.chunks_exact(channels).take(writable_frames).map(
                     |frame| {
                         frame
                             .iter()
-                            .map(|&sample| sample.to_sample::<f32>())
+                            .map(|&sample| sample.to_f32())
                             .sum::<f32>()
                             / channels as f32
                     },
@@ -490,67 +423,6 @@ impl AudioRecorder {
         // Publish the boundary write before acknowledging, including when the
         // pause request arrives during the write.
         acknowledge_pause_after_write(transport);
-    }
-
-    pub fn preferred_input_channel_count(
-        device: &cpal::Device,
-    ) -> Result<u16, Box<dyn std::error::Error>> {
-        Ok(Self::get_preferred_config(device)?.channels())
-    }
-
-    fn get_preferred_config(
-        device: &cpal::Device,
-    ) -> Result<cpal::SupportedStreamConfig, Box<dyn std::error::Error>> {
-        // Use the device's native/default sample rate and let the FrameResampler
-        // in run_consumer() downsample to 16kHz. This avoids forcing hardware into
-        // a non-native rate which can cause issues on some devices (Bluetooth
-        // codecs, certain ALSA drivers, etc.).
-        let default_config = device.default_input_config()?;
-        let target_rate = default_config.sample_rate();
-
-        // Try to find the best sample format at the device's default rate
-        let supported_configs = match device.supported_input_configs() {
-            Ok(configs) => configs,
-            Err(e) => {
-                log::warn!("Could not enumerate input configs ({e}), using device default");
-                return Ok(default_config);
-            }
-        };
-        let mut best_config: Option<cpal::SupportedStreamConfigRange> = None;
-
-        for config_range in supported_configs {
-            if config_range.min_sample_rate() <= target_rate
-                && config_range.max_sample_rate() >= target_rate
-            {
-                match best_config {
-                    None => best_config = Some(config_range),
-                    Some(ref current) => {
-                        // Prioritize F32 > I16 > I32 > others
-                        let score = |fmt: cpal::SampleFormat| match fmt {
-                            cpal::SampleFormat::F32 => 4,
-                            cpal::SampleFormat::I16 => 3,
-                            cpal::SampleFormat::I32 => 2,
-                            _ => 1,
-                        };
-
-                        if score(config_range.sample_format()) > score(current.sample_format()) {
-                            best_config = Some(config_range);
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(config) = best_config {
-            return Ok(config.with_sample_rate(target_rate));
-        }
-
-        // Fall back to device default if no config matched (exotic/virtual devices)
-        log::warn!(
-            "No supported config matched device default rate {:?}, using default config",
-            target_rate
-        );
-        Ok(default_config)
     }
 }
 
@@ -879,7 +751,9 @@ fn run_consumer(
         } else {
             ChunkDisposition::Discard
         };
-        processor.drain(&mut sample_consumer, disposition);
+        let _drained = processor.drain(&mut sample_consumer, disposition);
+        #[cfg(test)]
+        transport.frames_drained.fetch_add(_drained, Ordering::Release);
 
         let overrun_samples = transport.overrun_samples.swap(0, Ordering::AcqRel);
         if recording {
@@ -897,5 +771,7 @@ fn run_consumer(
 
 #[cfg(test)]
 mod equivalence;
+#[cfg(test)]
+mod seam_tests;
 #[cfg(test)]
 mod tests;

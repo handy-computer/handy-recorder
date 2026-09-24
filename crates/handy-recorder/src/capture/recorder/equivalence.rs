@@ -2,27 +2,26 @@
 //! reference (`capture::handy_reference`) and through the extracted pipeline
 //! must give bit-identical output, padding and resampler delay included.
 //!
-//! The extracted side runs end to end: the real-time callback writes into the
-//! ring while `run_consumer` handles Start/Stop on its own thread, with the
-//! pause handshake at each stop. One stream carries several recordings with
-//! idle audio between them, so resampler reset and tail flushing are covered.
+//! The extracted side runs end to end through the fake backend: the test
+//! thread delivers callback blocks while the recorder's consumer thread
+//! handles start and stop, with the pause handshake at each stop. One stream
+//! carries several recordings with idle audio between them, so resampler
+//! reset and tail flushing are covered.
 //!
 //! When the pipeline's shape changes (fake backend, sinks and chunks), only
 //! the extracted side of this file changes; the reference never does.
 
 use std::{
-    sync::{atomic::Ordering, mpsc, Arc, atomic::AtomicBool},
+    sync::{Arc, atomic::Ordering},
     thread,
     time::{Duration, Instant},
 };
 
 use dasp_sample::{FromSample, Sample};
-use rtrb::{Producer, RingBuffer};
+use rtrb::RingBuffer;
 
-use super::{
-    run_consumer, AudioRecorder, CaptureProcessor, CaptureTransportState, Cmd, AUDIO_RING_SECONDS,
-    OUTPUT_SAMPLE_RATE,
-};
+use super::{AudioRecorder, OUTPUT_SAMPLE_RATE};
+use crate::backend::{DeviceFormat, InputSample, fake::FakeBackend};
 use crate::capture::handy_reference as handy;
 
 /// Frames per callback block, cycled. Includes single-frame blocks and sizes
@@ -31,8 +30,15 @@ const BLOCK_FRAMES: &[usize] = &[1, 7, 480, 1024, 3, 2048, 441, 1, 1, 1500];
 
 const RATES: &[u32] = &[8_000, 16_000, 44_100, 48_000, 96_000];
 
-/// (device channels, selected channel). `None` averages all channels.
-const ROUTINGS: &[(usize, Option<usize>)] = &[(1, None), (2, None), (2, Some(1)), (4, Some(3))];
+/// (device channels, selected channel). `None` averages all channels, and so
+/// does an out-of-range channel (Handy's fallback).
+const ROUTINGS: &[(usize, Option<usize>)] = &[
+    (1, None),
+    (2, None),
+    (2, Some(1)),
+    (4, Some(3)),
+    (2, Some(5)),
+];
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -50,8 +56,8 @@ struct Stream<T> {
 /// Deterministic test signal: a distinct tone per channel plus hashed noise,
 /// with full-scale samples at regular frames so integer extremes are hit.
 fn sample_at(frame: usize, channel: usize, rate: u32) -> f32 {
-    if frame % 997 == 0 {
-        return if channel % 2 == 0 { 1.0 } else { -1.0 };
+    if frame.is_multiple_of(997) {
+        return if channel.is_multiple_of(2) { 1.0 } else { -1.0 };
     }
     let t = frame as f64 / rate as f64;
     let tone = (2.0 * std::f64::consts::PI * (220.0 + 170.0 * channel as f64) * t).sin() * 0.6;
@@ -155,22 +161,8 @@ fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
     }
 }
 
-fn write_block<T>(
-    producer: &mut Producer<f32>,
-    transport: &CaptureTransportState,
-    block: &[T],
-    channels: usize,
-    use_channel: Option<usize>,
-) where
-    T: cpal::SizedSample,
-    f32: FromSample<T>,
-{
-    // Never overrun: this test is about processing, not loss.
-    wait_until("ring space", || producer.slots() >= block.len() / channels);
-    AudioRecorder::write_input_to_ring(block, channels, use_channel, producer, transport);
-}
-
-/// The extracted pipeline, driven the way a device drives it.
+/// The extracted pipeline, opened on the fake backend and driven the way a
+/// device drives it.
 fn run_extracted<T>(
     stream: &Stream<T>,
     rate: u32,
@@ -179,59 +171,60 @@ fn run_extracted<T>(
     frame_samples: usize,
 ) -> Vec<Vec<f32>>
 where
-    T: cpal::SizedSample,
-    f32: FromSample<T>,
+    T: InputSample,
 {
-    let capacity = rate as usize * AUDIO_RING_SECONDS;
-    let (mut producer, consumer) = RingBuffer::<f32>::new(capacity);
-    let transport = Arc::new(CaptureTransportState::default());
-    let (cmd_tx, cmd_rx) = mpsc::channel();
-    let worker = {
-        let transport = Arc::clone(&transport);
-        thread::spawn(move || {
-            run_consumer(
-                CaptureProcessor::new(rate, frame_samples, None, Instant::now()),
-                consumer,
-                cmd_rx,
-                transport,
-                Arc::new(AtomicBool::new(false)),
-            )
-        })
-    };
+    let fake = FakeBackend::new(DeviceFormat {
+        sample_rate: rate,
+        channels: channels as u16,
+        sample_format: T::FORMAT,
+    });
+    let mut recorder = AudioRecorder::with_backend(Arc::new(fake.clone()))
+        .with_frame_samples(frame_samples)
+        .with_selected_channel(use_channel.map(|c| c as u16));
+    recorder.open(None).expect("open fake device");
+    let transport = Arc::clone(recorder.transport.as_ref().unwrap());
 
     let mut outputs = Vec::new();
+    // Samples the consumer had drained when the ring was last empty.
+    let mut drained_when_empty = 0;
     for (index, (idle, blocks)) in stream.idle.iter().zip(&stream.recordings).enumerate() {
         // Idle audio is discarded. Wait until it is drained, so none of it is
         // still in the ring when the recording starts.
+        let idle_frames: usize = idle.iter().map(|block| block.len() / channels).sum();
         for block in idle {
-            write_block(&mut producer, &transport, block, channels, use_channel);
+            assert!(fake.push(block));
         }
-        wait_until("idle audio drained", || producer.slots() == capacity);
+        wait_until("idle audio drained", || {
+            transport.frames_drained.load(Ordering::Acquire) == drained_when_empty + idle_frames
+        });
 
-        let (ready_tx, _ready_rx) = mpsc::channel();
-        cmd_tx.send(Cmd::Start(Instant::now(), ready_tx)).unwrap();
+        let _ready = recorder.start().expect("start");
         wait_until("start applied", || {
             transport.starts_applied.load(Ordering::Acquire) == index + 1
         });
 
         let (boundary, before_stop) = blocks.split_last().expect("recording has blocks");
         for block in before_stop {
-            write_block(&mut producer, &transport, block, channels, use_channel);
+            assert!(fake.push(block));
         }
 
         // The first callback after the stop request is the boundary block;
         // it belongs to the recording.
-        let (reply_tx, reply_rx) = mpsc::channel();
-        cmd_tx.send(Cmd::Stop(reply_tx)).unwrap();
-        wait_until("pause requested", || {
-            transport.pause_requested.load(Ordering::Acquire)
+        let output = thread::scope(|scope| {
+            let stopping = scope.spawn(|| recorder.stop().expect("stop"));
+            wait_until("pause requested", || {
+                transport.pause_requested.load(Ordering::Acquire)
+            });
+            assert!(fake.push(boundary));
+            stopping.join().unwrap()
         });
-        write_block(&mut producer, &transport, boundary, channels, use_channel);
-        outputs.push(reply_rx.recv_timeout(TIMEOUT).expect("stop reply"));
+        outputs.push(output);
+        // A stop drains the ring completely.
+        drained_when_empty = transport.frames_drained.load(Ordering::Acquire);
     }
 
-    cmd_tx.send(Cmd::Shutdown).unwrap();
-    worker.join().expect("consumer thread");
+    recorder.close().expect("close");
+    assert!(!fake.is_streaming(), "close released the stream");
     outputs
 }
 
@@ -247,7 +240,7 @@ fn assert_bit_identical(expected: &[f32], actual: &[f32], context: &str) {
 
 fn check_format<T>(format: &str)
 where
-    T: cpal::SizedSample + FromSample<f32>,
+    T: InputSample + Sample + FromSample<f32>,
     f32: FromSample<T>,
 {
     for (case, (&rate, &(channels, use_channel))) in RATES
@@ -259,7 +252,10 @@ where
         let frame_samples = if case % 2 == 0 { 480 } else { 512 };
         let stream = make_stream::<T>(rate, channels);
 
-        let expected = run_reference(&stream, rate, channels, use_channel, frame_samples);
+        // Handy resolves an out-of-range channel to averaging when it builds
+        // the stream; its callback only ever sees the resolved channel.
+        let resolved = use_channel.filter(|&c| c < channels);
+        let expected = run_reference(&stream, rate, channels, resolved, frame_samples);
         let actual = run_extracted(&stream, rate, channels, use_channel, frame_samples);
 
         assert_eq!(expected.len(), actual.len());
