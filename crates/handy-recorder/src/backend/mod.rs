@@ -1,7 +1,6 @@
 /// The capture engine talks to the microphone through the Backend trait
 /// instead of calling CPAL directly. In production that trait is implemented by
 /// cpal.rs, and in tests by fake.rs
-
 pub(crate) mod cpal;
 #[cfg(test)]
 pub(crate) mod fake;

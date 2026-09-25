@@ -1,5 +1,5 @@
 //! The delivery thread: drains the ring, resamples, cuts exact chunks, and
-//! runs the application's sink. 
+//! runs the application's sink.
 
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
