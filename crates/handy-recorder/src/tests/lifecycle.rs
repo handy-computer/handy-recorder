@@ -191,6 +191,64 @@ fn closing_from_inside_the_sink_does_not_deadlock() {
 }
 
 #[test]
+fn stop_from_inside_the_sink_fails_at_once_and_the_recording_continues() {
+    use std::sync::{Mutex, Weak, mpsc};
+    use std::time::Duration;
+
+    /// Calls `stop` on its own recorder from its first chunk.
+    struct Stopper {
+        recorder: Arc<Mutex<Weak<Recorder<Stopper>>>>,
+        result: Option<mpsc::Sender<ErrorKind>>,
+        samples: Vec<f32>,
+    }
+    impl crate::Sink for Stopper {
+        fn process_chunk(&mut self, chunk: crate::AudioChunk<'_>) {
+            if let Some(tx) = self.result.take() {
+                let recorder = self.recorder.lock().unwrap().upgrade().unwrap();
+                let kind = recorder.stop().err().map(|e| e.kind());
+                let _ = tx.send(kind.expect("stop from the sink must fail"));
+            }
+            self.samples
+                .extend_from_slice(&chunk.samples[..chunk.valid_frames]);
+        }
+    }
+
+    let fake = fake(16_000, 1);
+    let recorder: Arc<Recorder<Stopper>> = Arc::new(open(&fake, passthrough(160)));
+    let handle = Arc::new(Mutex::new(Arc::downgrade(&recorder)));
+    let (tx, rx) = mpsc::channel();
+    start(
+        &recorder,
+        Stopper {
+            recorder: handle,
+            result: Some(tx),
+            samples: Vec::new(),
+        },
+    );
+
+    assert!(fake.push(&ramp(0, 320)));
+    // Well inside the test stop deadline (2 s): the call does not wait for
+    // the delivery thread it is running on.
+    let kind = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("stop from the sink returned promptly");
+    assert_eq!(kind, ErrorKind::StopFromSink);
+
+    // The recording and the recorder are unaffected.
+    let stopped = stop_with_boundary(&recorder, &fake, &ramp(320, 160)).unwrap();
+    assert!(stopped.is_complete(), "{:?}", stopped.end_reason);
+    assert_eq!(stopped.sink.samples, ramp(0, 480));
+    start(
+        &recorder,
+        Stopper {
+            recorder: Arc::new(Mutex::new(Weak::new())),
+            result: None,
+            samples: Vec::new(),
+        },
+    );
+}
+
+#[test]
 fn the_sink_first_call_marks_audio_flowing() {
     use std::sync::mpsc;
 

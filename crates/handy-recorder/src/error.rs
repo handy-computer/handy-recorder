@@ -31,7 +31,8 @@ impl Error {
 
     /// How long the stream had been running when this happened. `None` for
     /// failures before the stream started (during `open`) and for errors
-    /// that are not about the stream (`AlreadyRecording`, `NotRecording`).
+    /// that are not about the stream (`AlreadyRecording`, `NotRecording`,
+    /// `StopFromSink`).
     pub fn elapsed(&self) -> Option<Duration> {
         self.0.elapsed
     }
@@ -96,7 +97,7 @@ impl std::error::Error for Error {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ErrorKind {
-    // From `open`. 
+    // From `open`.
     /// No such device, or no input device at all.
     DeviceUnavailable,
     /// Another application has exclusive use of the device.
@@ -135,6 +136,9 @@ pub enum ErrorKind {
     AlreadyRecording,
     /// `stop` with no recording to stop.
     NotRecording,
+    /// `stop` called from inside the sink. The recording continues; the sink
+    /// should signal the application, which calls `stop` from another thread.
+    StopFromSink,
     /// The platform did not finish tearing the stream down in time.
     CloseTimedOut,
 }
@@ -143,7 +147,11 @@ impl ErrorKind {
     fn is_about_device(self) -> bool {
         !matches!(
             self,
-            Self::SinkStalled | Self::Processing | Self::AlreadyRecording | Self::NotRecording
+            Self::SinkStalled
+                | Self::Processing
+                | Self::AlreadyRecording
+                | Self::NotRecording
+                | Self::StopFromSink
         )
     }
 
@@ -177,6 +185,7 @@ impl ErrorKind {
             (Self::Processing, _) => "audio processing failed (a bug in handy-recorder)",
             (Self::AlreadyRecording, _) => "a recording is already active",
             (Self::NotRecording, _) => "there is no recording to stop",
+            (Self::StopFromSink, _) => "stop cannot be called from inside the sink",
             (Self::CloseTimedOut, true) => "did not finish closing in time",
             (Self::CloseTimedOut, false) => "the input device did not finish closing in time",
         }

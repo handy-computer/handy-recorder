@@ -136,8 +136,10 @@ impl<S: Sink> Recorder<S> {
     /// recorder failed or the sink panicked; `end_reason` says what ended it.
     /// Returns `Err` with `NotRecording` if there is no recording, or
     /// `SinkStalled` if the sink never returned and is lost; after
-    /// `SinkStalled` the slot is released and the recorder has failed. To
-    /// cancel a recording, stop it and drop the result.
+    /// `SinkStalled` the slot is released and the recorder has failed.
+    /// Called from inside the sink, it returns `StopFromSink` at once and the
+    /// recording continues. To cancel a recording, stop it and drop the
+    /// result.
     pub fn stop(&self) -> Result<Stopped<S>, Error> {
         self.engine.stop()
     }

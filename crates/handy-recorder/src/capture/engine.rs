@@ -14,7 +14,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
-    thread::{self, JoinHandle},
+    thread::{self, JoinHandle, ThreadId},
     time::{Duration, Instant},
 };
 
@@ -207,6 +207,8 @@ pub(crate) struct Engine<S> {
     backend: Arc<dyn Backend>,
     info: RecorderInfo,
     delivery_tx: mpsc::Sender<DeliveryCmd<S>>,
+    /// The thread that runs the sink, where `stop` cannot work.
+    delivery_thread: ThreadId,
     slot: Mutex<Slot>,
     threads: Mutex<Option<Threads>>,
     timeouts: Timeouts,
@@ -328,6 +330,8 @@ impl<S: Sink> Engine<S> {
             }
         };
 
+        let delivery_thread = delivery.thread().id();
+
         log::info!(
             "opened {} ({}) at {} Hz, {} ch; delivering {} Hz, {} ch, {}-frame chunks",
             info.device.name,
@@ -344,6 +348,7 @@ impl<S: Sink> Engine<S> {
             backend: engine_backend,
             info,
             delivery_tx,
+            delivery_thread,
             slot: Mutex::new(Slot::Idle),
             threads: Mutex::new(Some(Threads {
                 device,
@@ -403,6 +408,12 @@ impl<S: Sink> Engine<S> {
     }
 
     pub fn stop(&self) -> Result<Stopped<S>, Error> {
+        // The sink is borrowed by the call it is making, so it cannot be
+        // handed back; waiting for the delivery thread would wait for itself.
+        if thread::current().id() == self.delivery_thread {
+            log::warn!("stop called from inside the sink; the recording continues");
+            return Err(Error::new(ErrorKind::StopFromSink));
+        }
         {
             let mut slot = self.slot.lock().unwrap();
             if *slot != Slot::Recording {
