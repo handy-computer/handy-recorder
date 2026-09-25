@@ -1,6 +1,5 @@
 //! The real-time half of the capture path: the callback body and the atomics
-//! it shares with the delivery thread. From Handy's `recorder.rs`, with
-//! K-channel routing and a progress counter for the watchdog.
+//! it shares with the delivery thread.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 

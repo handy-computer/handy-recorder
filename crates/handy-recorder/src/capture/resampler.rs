@@ -1,14 +1,12 @@
 use rubato::{FftFixedIn, ResampleError, Resampler, ResamplerConstructionError};
 use std::fmt;
 
-// Make this a constant you can tweak
+/// Fixed resampler FFT chunk size
 const RESAMPLER_CHUNK_SIZE: usize = 1024;
 
-/// Handy's cap on zero-chunk rounds when draining the tail at `finish()`.
+/// Cap on zero-chunk rounds when draining the tail at `finish()`.
 const MAX_TAIL_ROUNDS: usize = 8;
 
-/// Handy ignored Rubato errors and cleared the buffer. The library fails the
-/// recorder with `Processing` instead, so they are returned.
 #[derive(Debug)]
 pub enum ResamplerError {
     Resample(ResampleError),
@@ -39,8 +37,6 @@ impl From<ResampleError> for ResamplerError {
 
 /// Resamples interleaved K-channel audio and cuts it into fixed-size chunks.
 ///
-/// Handy's resampler, generalized to K channels. With one channel it makes
-/// exactly Handy's Rubato calls, which the equivalence test holds it to.
 /// Chunks are emitted as `(interleaved samples, valid frames)`: every chunk
 /// has `frames_per_chunk` frames, and only the final one, from `finish()`, is
 /// zero-padded, with `valid frames` saying how many of its frames are real.
@@ -73,7 +69,6 @@ impl FrameResampler {
         assert!(frames_per_chunk > 0, "chunk size must be non-zero");
         assert!(channels > 0, "channel count must be non-zero");
 
-        // Use fixed chunk size instead of GCD-based
         let chunk_in = RESAMPLER_CHUNK_SIZE;
 
         let resampler = if in_hz != out_hz {
@@ -171,10 +166,9 @@ impl FrameResampler {
         let delay = self.output_delay();
         let expected = self.in_count * self.out_hz / self.in_hz + delay;
 
-        // Process any remaining input samples (padded internally). Handy
-        // emits all of this output; the output of the internal padding is
-        // synthetic, so the library keeps only what the count above allows
-        // and zero-pads the final chunk instead.
+        // Process any remaining input samples (padded internally). The
+        // padding's output is synthetic, so keep only what the count above
+        // allows; finish() zero-pads the final chunk instead.
         if !self.in_buf[0].is_empty() {
             let result = self
                 .resampler
@@ -357,17 +351,15 @@ mod tests {
 
         // After the resampler settles (skip first frame which may have transient),
         // all samples should be near -0.5, not contaminated by the ascending ramp.
-        if out2.len() > 480 {
-            // Skip first frame (480 samples at 16kHz/30ms), check the rest
-            let tail = &out2[480..];
-            for (i, &s) in tail.iter().enumerate() {
-                assert!(
-                    (s - (-0.5)).abs() < 0.05,
-                    "Recording 2 sample {} = {} (expected ~-0.5); ramp leaked through",
-                    i + 480,
-                    s
-                );
-            }
+        // Skip first frame (480 samples at 16kHz/30ms), check the rest
+        let tail = &out2[480..];
+        for (i, &s) in tail.iter().enumerate() {
+            assert!(
+                (s - (-0.5)).abs() < 0.05,
+                "Recording 2 sample {} = {} (expected ~-0.5); ramp leaked through",
+                i + 480,
+                s
+            );
         }
     }
 
@@ -387,15 +379,14 @@ mod tests {
         let silence = vec![0.0f32; 960];
         let out = collect_output(&mut r, &silence);
 
-        // First complete frame should be all zeros, not contain the 1.0 values
-        if !out.is_empty() {
-            let max_abs = out.iter().take(480).map(|s| s.abs()).fold(0.0f32, f32::max);
-            assert!(
-                max_abs < 0.001,
-                "Passthrough mode: pending buffer should be cleared after reset, got max_abs={}",
-                max_abs
-            );
-        }
+        // Two complete frames, the first all zeros, not containing the 1.0 values
+        assert_eq!(out.len(), 960);
+        let max_abs = out.iter().take(480).map(|s| s.abs()).fold(0.0f32, f32::max);
+        assert!(
+            max_abs < 0.001,
+            "Passthrough mode: pending buffer should be cleared after reset, got max_abs={}",
+            max_abs
+        );
     }
 
     /// Push silence ending in a 200-sample 0.5 burst, then assert finish()
@@ -463,12 +454,6 @@ mod tests {
             "stale resampler tail from finish() leaked into the next session"
         );
     }
-}
-
-/// Library additions: K channels, valid frames, and output counts.
-#[cfg(test)]
-mod k_channel_tests {
-    use super::*;
 
     fn signal(rate: usize, channel: usize, frames: usize) -> Vec<f32> {
         (0..frames)
@@ -562,7 +547,7 @@ mod k_channel_tests {
 
     #[test]
     fn output_counts_follow_the_frame_count_formula() {
-        // Handy's output: floor(input * out / in) real frames plus the
+        // floor(input * out / in) real frames plus the
         // resampler's output delay (trimming it is deferred), padding
         // excluded. Passthrough emits exactly the input.
         for in_hz in [8_000, 16_000, 22_050, 32_000, 44_100, 48_000, 96_000] {

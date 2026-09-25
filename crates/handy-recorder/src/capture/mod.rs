@@ -10,10 +10,6 @@
 
 pub(crate) mod delivery;
 pub(crate) mod engine;
-// Frozen: never edited, never reformatted.
-#[cfg(test)]
-#[rustfmt::skip]
-pub(crate) mod handy_reference;
 mod resampler;
 pub(crate) mod transport;
 

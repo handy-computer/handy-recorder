@@ -1,7 +1,5 @@
 //! The delivery thread: drains the ring, resamples, cuts exact chunks, and
-//! runs the application's sink. Handy's consumer loop (`run_consumer`), with
-//! the recording's audio going to a sink instead of a buffer, and with
-//! failures reported instead of marking the stream for a rebuild.
+//! runs the application's sink. 
 
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},

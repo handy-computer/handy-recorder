@@ -101,12 +101,9 @@ pub(crate) enum InputData<'a> {
     F64(&'a [f64]),
 }
 
-/// A device sample type. The conversion to `f32` is `dasp_sample`'s, which is
-/// what Handy used through `cpal::Sample`; the equivalence test holds it to
-/// that bit for bit.
+/// A device sample type. The conversion to `f32` is `dasp_sample`'s, the
+/// same conversion `cpal::Sample` uses.
 pub(crate) trait InputSample: Copy + Send + 'static {
-    #[cfg_attr(not(test), allow(dead_code))]
-    const FORMAT: SampleFormat;
     fn to_f32(self) -> f32;
     fn wrap(data: &[Self]) -> InputData<'_>;
 }
@@ -114,7 +111,6 @@ pub(crate) trait InputSample: Copy + Send + 'static {
 macro_rules! input_sample {
     ($($t:ty => $variant:ident),*) => {$(
         impl InputSample for $t {
-            const FORMAT: SampleFormat = SampleFormat::$variant;
             #[inline]
             fn to_f32(self) -> f32 {
                 self.to_sample::<f32>()

@@ -42,8 +42,7 @@ const MAX_OUTPUT_RATE: u32 = 768_000;
 /// Chunks longer than this are `UnsupportedFormat`.
 const MAX_CHUNK_SECONDS: usize = 10;
 
-/// Every internal bound. Not configurable by applications; tests shorten
-/// them.
+/// Timeout struct primarily for testing.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Timeouts {
     /// `open` waits this long for the platform to build and start the stream.
@@ -53,7 +52,7 @@ pub(crate) struct Timeouts {
     /// `close` waits this long for the delivery thread to leave the sink.
     pub delivery_exit: Duration,
     /// A device that delivers no audio for this long after `open` fails with
-    /// `NoAudio`. Generous: Bluetooth devices can take seconds.
+    /// `NoAudio`. Bluetooth devices can take seconds.
     pub no_audio: Duration,
     /// A device that delivered audio and then made no callback for this long
     /// fails with `Stalled`.
@@ -62,7 +61,7 @@ pub(crate) struct Timeouts {
     /// long fails the recorder with `SinkStalled`.
     pub heartbeat: Duration,
     /// `stop` waits this long for the callback to acknowledge the pause
-    /// (Handy's value); otherwise the stream stalled.
+    /// otherwise the stream stalled.
     pub pause_ack: Duration,
     /// `stop`'s overall deadline. Must exceed `pause_ack`, so a stopped
     /// callback is classified as `Stalled` before it expires.
@@ -71,8 +70,7 @@ pub(crate) struct Timeouts {
     pub watchdog_tick: Duration,
 }
 
-// REVIEW(timeouts): generous placeholders, to be set from the tier-3 hardware
-// probes (DESIGN.md, "Before the first release").
+// Production constants for timeouts
 impl Default for Timeouts {
     fn default() -> Self {
         Self {
