@@ -263,9 +263,9 @@ fn stereo_frames_stay_aligned_across_ring_wraparound() {
         let (first, second) = chunk.as_slices();
         let samples: Vec<f32> = first.iter().chain(second).copied().collect();
         chunk.commit_all();
-        for frame in samples.chunks_exact(2) {
-            left.push(frame[0]);
-            right.push(frame[1]);
+        for &[l, r] in samples.as_chunks::<2>().0 {
+            left.push(l);
+            right.push(r);
         }
     }
 

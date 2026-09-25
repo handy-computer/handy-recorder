@@ -24,7 +24,7 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev
       - uses: Swatinem/rust-cache@v2
-      # Formatting (the frozen Handy reference is #[rustfmt::skip]).
+      # Formatting.
       - run: cargo fmt --all --check
       # The library and the probe, warnings as errors.
       - run: cargo clippy --workspace --all-targets -- -D warnings

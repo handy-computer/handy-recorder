@@ -244,7 +244,10 @@ fn an_overrun_is_counted_in_whole_frames_and_keeps_channels_aligned() {
     assert!(!stopped.is_complete());
     let real = stopped.sink.1.real();
     assert!(
-        real.chunks_exact(2).all(|f| f[0] > 0.0 && f[1] < 0.0),
+        real.as_chunks::<2>()
+            .0
+            .iter()
+            .all(|&[l, r]| l > 0.0 && r < 0.0),
         "a frame was split"
     );
     let delivered = stopped.sink.1.valid_frames() as u64;
