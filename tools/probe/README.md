@@ -178,9 +178,7 @@ plain PulseAudio; the results header says which ("sound server").
 
 ## Results so far
 
-macOS 27, MacBook Pro (Mac16,6), AirPods Pro 3, USB-C EarPods, 2026-09-24
-(raw logs in `results/2026-09-24-macos-session/` on the machine that ran
-them):
+macOS 27, MacBook Pro (Mac16,6), AirPods Pro 3, USB-C EarPods, 2026-09-24:
 
 - `auto`: all PASS on the built-in microphone.
 - Disconnects: `DeviceLost` in about 2 s (USB) with the audio before it
@@ -194,5 +192,9 @@ them):
   wake (32.6 s of process uptime without callbacks). After the watchdog
   change, an idle recorder survives sleep. AirPods disconnect on sleep
   (`DeviceLost`).
-- Permission denied: `open` fails with `PermissionDenied` (after the fix;
-  before it, recordings were silent).
+- Permission denied: `open` fails with `PermissionDenied`.
+- Bluetooth handoff: moving the AirPods to a phone mid-recording keeps the
+  Mac's device alive, callbacks on schedule, and no platform error; the
+  stream delivers exact zeros until the AirPods come back, then real audio
+  resumes on the same stream. No CoreAudio device property changes during
+  the handoff.
