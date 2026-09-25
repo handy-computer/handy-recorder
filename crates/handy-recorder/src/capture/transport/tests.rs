@@ -1,7 +1,6 @@
-//! Handy's callback and ring tests (recorder/tests.rs at 8f9cf53c), against
-//! the callback as a free function, plus the K-channel ring tests. Handy's
-//! consumer-loop tests moved to `crate::tests::handy_ported`, which drives
-//! the same scenarios through `Recorder`.
+//! Callback and ring tests, against the callback as a free function,
+//! including the K-channel ring tests. Consumer-loop scenarios are tested
+//! through `Recorder` in `crate::tests`.
 
 use std::sync::atomic::Ordering;
 

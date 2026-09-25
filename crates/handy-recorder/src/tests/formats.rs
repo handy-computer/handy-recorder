@@ -60,8 +60,7 @@ fn speech_config_resolves_to_16_khz_mono_30_ms() {
     );
 }
 
-/// Handy's `resampler_frame_size_follows_the_vad_backend`: chunks follow the
-/// requested size (a VAD taking exactly 512 samples).
+/// Chunks follow the requested size (a VAD taking exactly 512 samples).
 #[test]
 fn chunks_follow_the_requested_size() {
     let fake = fake(16_000, 1);

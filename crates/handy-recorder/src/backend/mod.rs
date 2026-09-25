@@ -66,7 +66,7 @@ pub(crate) struct DeviceFormat {
     pub sample_format: SampleFormat,
 }
 
-/// Device sample formats the engine accepts, as Handy does.
+/// Device sample formats the engine accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SampleFormat {
     U8,

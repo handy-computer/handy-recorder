@@ -1,5 +1,5 @@
-//! The CPAL 0.18 backend. Stream construction is Handy's (`recorder.rs` at
-//! 8f9cf53c); the device opens at its OS default format (`get_preferred_config`).
+//! The CPAL 0.18 backend. The device opens at its OS default format
+//! (`default_input_config`).
 
 use std::{
     collections::HashMap,
@@ -35,10 +35,8 @@ impl CpalBackend {
         Arc::clone(SHARED.get_or_init(|| Arc::new(Self::new())))
     }
 
-    /// Handy forces the ALSA host on Linux. The library targets the native
-    /// PulseAudio host there (with ALSA fallback), which `default_host`
-    /// selects when the `pulseaudio` feature is enabled and a server is
-    /// running.
+    /// cpal's default host. On Linux that is PulseAudio when a server is
+    /// running (the `pulseaudio` feature in Cargo.toml), otherwise ALSA.
     pub fn new() -> Self {
         Self {
             host: cpal::default_host(),
@@ -65,7 +63,7 @@ fn id_is_stable(host: cpal::HostId) -> bool {
 }
 
 /// Reads a device's channel count without opening it: the channel count of
-/// the format it would be opened at (Handy's `preferred_input_channel_count`).
+/// the format it would be opened at.
 /// `None` on ALSA, where reading a device's configs opens its PCM, which
 /// cpal avoids during enumeration because failed opens can leak descriptors.
 fn channels_without_opening(host: cpal::HostId, device: &cpal::Device) -> Option<u16> {
@@ -74,7 +72,7 @@ fn channels_without_opening(host: cpal::HostId, device: &cpal::Device) -> Option
         return None;
     }
     let _ = host;
-    get_preferred_config(device).ok().map(|c| c.channels())
+    device.default_input_config().ok().map(|c| c.channels())
 }
 
 /// Enumerates input devices with their identity. A device whose backend has
@@ -176,7 +174,10 @@ impl Backend for CpalBackend {
         };
 
         let config_started = Instant::now();
-        let config = get_preferred_config(&device)
+        // The format the OS has the device set to: the WASAPI mix format,
+        // the CoreAudio stream format, or cpal's pick on ALSA.
+        let config = device
+            .default_input_config()
             .map_err(|e| map_error_during("Failed to fetch preferred config", e))?;
         log::debug!("fetch_config={:?}", config_started.elapsed());
 
@@ -372,8 +373,8 @@ where
     )
 }
 
-/// Keeps Handy's message prefixes, which say which step failed (and which
-/// Handy's `is_no_input_device_error` matches on).
+/// Prefixes the message with the step that failed, which
+/// `is_no_input_device_error` matches on.
 fn map_error_during(step: &str, e: cpal::Error) -> BackendError {
     BackendError::new(map_kind(e.kind()), format!("{step}: {e}"))
 }
@@ -404,15 +405,6 @@ fn map_kind(kind: cpal::ErrorKind) -> BackendErrorKind {
         cpal::ErrorKind::RealtimeDenied => BackendErrorKind::RealtimeDenied,
         _ => BackendErrorKind::Other,
     }
-}
-
-/// The format the OS has the device set to: the WASAPI mix format, the
-/// CoreAudio stream format, or cpal's pick on ALSA. Nothing else is tried. A
-/// format the OS reports as supported is not always safe: on Windows, some
-/// drivers accept F32 and then deliver only zeros (Handy#2141), and on macOS a
-/// listed format can differ from the stream format and fail to open (Handy#1163).
-fn get_preferred_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, cpal::Error> {
-    device.default_input_config()
 }
 
 #[cfg(test)]

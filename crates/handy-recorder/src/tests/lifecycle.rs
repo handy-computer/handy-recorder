@@ -43,9 +43,6 @@ fn a_recording_delivers_exactly_the_audio_between_start_and_the_boundary() {
     assert_eq!((chunks.sample_rate, chunks.channels), (16_000, 1));
 }
 
-/// Handy's `idle_chunks_are_discarded_without_reaching_the_recording` and
-/// `repeated_start_stop_cycles_resume_capture_without_leaking_samples`,
-/// through the recorder.
 #[test]
 fn repeated_recordings_on_a_warm_recorder_neither_lose_nor_leak_audio() {
     let fake = fake(16_000, 1);
@@ -155,7 +152,6 @@ fn dropping_the_recorder_closes_it() {
     assert!(!fake.is_streaming());
 }
 
-/// Handy's `shutdown_is_processed_without_audio_samples`.
 #[test]
 fn close_without_any_audio_is_prompt() {
     let fake = fake(48_000, 2);
