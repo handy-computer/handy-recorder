@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::backend::{DeviceFormat, InputSample, SampleFormat, fake::FakeBackend};
-use crate::capture::engine::Timeouts;
+use crate::capture::engine::{Engine, Timeouts};
 use crate::capture::transport::CaptureTransportState;
 use crate::{AudioChunk, Error, Recorder, RecorderConfig, Sink, Stopped};
 
@@ -50,7 +50,19 @@ pub fn open_with<S: Sink>(
     config: RecorderConfig,
     timeouts: Timeouts,
 ) -> Result<Recorder<S>, Error> {
-    Recorder::open_with(Arc::new(fake.clone()), config, None, timeouts)
+    open_handled(fake, config, None, timeouts)
+}
+
+/// Opens over the fake backend with an optional failure handler.
+pub fn open_handled<S: Sink>(
+    fake: &FakeBackend,
+    config: RecorderConfig,
+    handler: Option<Box<dyn FnOnce(Error) + Send + 'static>>,
+    timeouts: Timeouts,
+) -> Result<Recorder<S>, Error> {
+    Ok(Recorder {
+        engine: Engine::open(Arc::new(fake.clone()), config, handler, timeouts)?,
+    })
 }
 
 /// Opens with a failure handler that forwards to the returned receiver.
@@ -60,8 +72,8 @@ pub fn open_notified<S: Sink>(
     timeouts: Timeouts,
 ) -> (Recorder<S>, mpsc::Receiver<Error>) {
     let (tx, rx) = mpsc::channel();
-    let recorder = Recorder::open_with(
-        Arc::new(fake.clone()),
+    let recorder = open_handled(
+        fake,
         config,
         Some(Box::new(move |error| {
             let _ = tx.send(error);

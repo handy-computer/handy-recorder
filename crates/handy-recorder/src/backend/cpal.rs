@@ -1,9 +1,9 @@
-//! The CPAL 0.18 backend. Stream construction and preferred-format selection
-//! are Handy's (`recorder.rs` at 8f9cf53c), moved behind the backend seam.
+//! The CPAL 0.18 backend. Stream construction is Handy's (`recorder.rs` at
+//! 8f9cf53c); the device opens at its OS default format (`get_preferred_config`).
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, OnceLock},
     time::Instant,
 };
 
@@ -15,16 +15,8 @@ use super::{
 };
 use crate::{InputDevice, Permission};
 
-/// Preferred stream config cached per device. The two HAL property queries
-/// in `get_preferred_config` cost ~40-85ms per open (worse on USB/Bluetooth),
-/// which lands on the keypress->capture path in on-demand mode. Keyed by
-/// device ID so a system-default change misses naturally; cleared whenever
-/// an open fails so a stale rate/format self-heals on the caller's retry.
-type ConfigCache = Arc<Mutex<Option<(cpal::DeviceId, cpal::SupportedStreamConfig)>>>;
-
 pub(crate) struct CpalBackend {
     host: cpal::Host,
-    config_cache: ConfigCache,
 }
 
 // One host for the process: the PulseAudio host opens a server connection
@@ -36,9 +28,7 @@ const _: () = {
 };
 
 impl CpalBackend {
-    /// The process-wide backend. Sharing it also shares Handy's
-    /// preferred-config cache across recorders, so reopening a device skips
-    /// the HAL queries.
+    /// The process-wide backend.
     // TODO(review): see TODO.md, "PulseAudio server restarts".
     pub fn shared() -> Arc<Self> {
         static SHARED: OnceLock<Arc<CpalBackend>> = OnceLock::new();
@@ -52,7 +42,6 @@ impl CpalBackend {
     pub fn new() -> Self {
         Self {
             host: cpal::default_host(),
-            config_cache: ConfigCache::default(),
         }
     }
 }
@@ -187,26 +176,9 @@ impl Backend for CpalBackend {
         };
 
         let config_started = Instant::now();
-        let device_id = device.id().ok();
-        let cached_config = self
-            .config_cache
-            .lock()
-            .unwrap()
-            .as_ref()
-            .filter(|(id, _)| device_id.as_ref() == Some(id))
-            .map(|(_, cfg)| *cfg);
-        let config_was_cached = cached_config.is_some();
-        let config = match cached_config {
-            Some(cfg) => cfg,
-            None => get_preferred_config(&device).map_err(|e| {
-                self.clear_cache();
-                map_error_during("Failed to fetch preferred config", e)
-            })?,
-        };
-        log::debug!(
-            "fetch_config={:?} (cached={config_was_cached})",
-            config_started.elapsed()
-        );
+        let config = get_preferred_config(&device)
+            .map_err(|e| map_error_during("Failed to fetch preferred config", e))?;
+        log::debug!("fetch_config={:?}", config_started.elapsed());
 
         let sample_format = match config.sample_format() {
             cpal::SampleFormat::U8 => SampleFormat::U8,
@@ -222,7 +194,6 @@ impl Backend for CpalBackend {
             cpal::SampleFormat::F32 => SampleFormat::F32,
             cpal::SampleFormat::F64 => SampleFormat::F64,
             sample_format => {
-                self.clear_cache();
                 return Err(BackendError::new(
                     BackendErrorKind::UnsupportedConfig,
                     format!("Unsupported sample format: {sample_format:?}"),
@@ -235,23 +206,15 @@ impl Backend for CpalBackend {
 
         Ok(Box::new(CpalOpenDevice {
             info,
+            device_id: device.id().ok(),
             device,
-            device_id,
             config,
-            config_was_cached,
             format: DeviceFormat {
                 sample_rate: config.sample_rate(),
                 channels: config.channels(),
                 sample_format,
             },
-            config_cache: Arc::clone(&self.config_cache),
         }))
-    }
-}
-
-impl CpalBackend {
-    fn clear_cache(&self) {
-        *self.config_cache.lock().unwrap() = None;
     }
 }
 
@@ -260,9 +223,7 @@ struct CpalOpenDevice {
     device: cpal::Device,
     device_id: Option<cpal::DeviceId>,
     config: cpal::SupportedStreamConfig,
-    config_was_cached: bool,
     format: DeviceFormat,
-    config_cache: ConfigCache,
 }
 
 struct CpalStream {
@@ -357,64 +318,38 @@ impl OpenDevice for CpalOpenDevice {
         data: DataCallback,
         error: ErrorCallback,
     ) -> Result<Box<dyn InputStream>, BackendError> {
-        let result = (|| {
-            let build_started = Instant::now();
-            let stream = match self.format.sample_format {
-                SampleFormat::U8 => build_stream::<u8>(&self.device, &self.config, data, error),
-                SampleFormat::I8 => build_stream::<i8>(&self.device, &self.config, data, error),
-                SampleFormat::U16 => build_stream::<u16>(&self.device, &self.config, data, error),
-                SampleFormat::I16 => build_stream::<i16>(&self.device, &self.config, data, error),
-                SampleFormat::U24 => {
-                    build_stream::<cpal::U24>(&self.device, &self.config, data, error)
-                }
-                SampleFormat::I24 => {
-                    build_stream::<cpal::I24>(&self.device, &self.config, data, error)
-                }
-                SampleFormat::U32 => build_stream::<u32>(&self.device, &self.config, data, error),
-                SampleFormat::I32 => build_stream::<i32>(&self.device, &self.config, data, error),
-                SampleFormat::U64 => build_stream::<u64>(&self.device, &self.config, data, error),
-                SampleFormat::I64 => build_stream::<i64>(&self.device, &self.config, data, error),
-                SampleFormat::F32 => build_stream::<f32>(&self.device, &self.config, data, error),
-                SampleFormat::F64 => build_stream::<f64>(&self.device, &self.config, data, error),
-            }
-            .map_err(|e| map_error_during("Failed to build input stream", e))?;
-            let build_elapsed = build_started.elapsed();
-
-            let play_started = Instant::now();
-            stream
-                .play()
-                .map_err(|e| map_error_during("Failed to start microphone stream", e))?;
-            log::debug!(
-                "build_stream={:?} play={:?}",
-                build_elapsed,
-                play_started.elapsed()
-            );
-            Ok(stream)
-        })();
-
-        match result {
-            Ok(stream) => {
-                // The device accepted this config; remember it so the next
-                // open skips the HAL property queries entirely.
-                if !self.config_was_cached
-                    && let Some(device_id) = self.device_id.clone()
-                {
-                    *self.config_cache.lock().unwrap() = Some((device_id, self.config));
-                }
-                Ok(Box::new(CpalStream {
-                    _stream: stream,
-                    device_id: self.device_id,
-                    headset: None,
-                }))
-            }
-            Err(e) => {
-                // A failed open may mean the cached config went stale
-                // (device re-plugged, rate/format changed in the OS).
-                // Drop it so the next attempt re-queries the device.
-                *self.config_cache.lock().unwrap() = None;
-                Err(e)
-            }
+        let build_started = Instant::now();
+        let stream = match self.format.sample_format {
+            SampleFormat::U8 => build_stream::<u8>(&self.device, &self.config, data, error),
+            SampleFormat::I8 => build_stream::<i8>(&self.device, &self.config, data, error),
+            SampleFormat::U16 => build_stream::<u16>(&self.device, &self.config, data, error),
+            SampleFormat::I16 => build_stream::<i16>(&self.device, &self.config, data, error),
+            SampleFormat::U24 => build_stream::<cpal::U24>(&self.device, &self.config, data, error),
+            SampleFormat::I24 => build_stream::<cpal::I24>(&self.device, &self.config, data, error),
+            SampleFormat::U32 => build_stream::<u32>(&self.device, &self.config, data, error),
+            SampleFormat::I32 => build_stream::<i32>(&self.device, &self.config, data, error),
+            SampleFormat::U64 => build_stream::<u64>(&self.device, &self.config, data, error),
+            SampleFormat::I64 => build_stream::<i64>(&self.device, &self.config, data, error),
+            SampleFormat::F32 => build_stream::<f32>(&self.device, &self.config, data, error),
+            SampleFormat::F64 => build_stream::<f64>(&self.device, &self.config, data, error),
         }
+        .map_err(|e| map_error_during("Failed to build input stream", e))?;
+        let build_elapsed = build_started.elapsed();
+
+        let play_started = Instant::now();
+        stream
+            .play()
+            .map_err(|e| map_error_during("Failed to start microphone stream", e))?;
+        log::debug!(
+            "build_stream={:?} play={:?}",
+            build_elapsed,
+            play_started.elapsed()
+        );
+        Ok(Box::new(CpalStream {
+            _stream: stream,
+            device_id: self.device_id,
+            headset: None,
+        }))
     }
 }
 
@@ -471,57 +406,13 @@ fn map_kind(kind: cpal::ErrorKind) -> BackendErrorKind {
     }
 }
 
+/// The format the OS has the device set to: the WASAPI mix format, the
+/// CoreAudio stream format, or cpal's pick on ALSA. Nothing else is tried. A
+/// format the OS reports as supported is not always safe: on Windows, some
+/// drivers accept F32 and then deliver only zeros (Handy#2141), and on macOS a
+/// listed format can differ from the stream format and fail to open (Handy#1163).
 fn get_preferred_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, cpal::Error> {
-    // Use the device's native/default sample rate and let the FrameResampler
-    // downsample to 16kHz. This avoids forcing hardware into
-    // a non-native rate which can cause issues on some devices (Bluetooth
-    // codecs, certain ALSA drivers, etc.).
-    let default_config = device.default_input_config()?;
-    let target_rate = default_config.sample_rate();
-
-    // Try to find the best sample format at the device's default rate
-    let supported_configs = match device.supported_input_configs() {
-        Ok(configs) => configs,
-        Err(e) => {
-            log::warn!("Could not enumerate input configs ({e}), using device default");
-            return Ok(default_config);
-        }
-    };
-    let mut best_config: Option<cpal::SupportedStreamConfigRange> = None;
-
-    for config_range in supported_configs {
-        if config_range.min_sample_rate() <= target_rate
-            && config_range.max_sample_rate() >= target_rate
-        {
-            match best_config {
-                None => best_config = Some(config_range),
-                Some(ref current) => {
-                    // Prioritize F32 > I16 > I32 > others
-                    let score = |fmt: cpal::SampleFormat| match fmt {
-                        cpal::SampleFormat::F32 => 4,
-                        cpal::SampleFormat::I16 => 3,
-                        cpal::SampleFormat::I32 => 2,
-                        _ => 1,
-                    };
-
-                    if score(config_range.sample_format()) > score(current.sample_format()) {
-                        best_config = Some(config_range);
-                    }
-                }
-            }
-        }
-    }
-
-    if let Some(config) = best_config {
-        return Ok(config.with_sample_rate(target_rate));
-    }
-
-    // Fall back to device default if no config matched (exotic/virtual devices)
-    log::warn!(
-        "No supported config matched device default rate {:?}, using default config",
-        target_rate
-    );
-    Ok(default_config)
+    device.default_input_config()
 }
 
 #[cfg(test)]

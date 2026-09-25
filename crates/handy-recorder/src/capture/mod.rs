@@ -1,13 +1,12 @@
-//! The capture engine. Its real-time path, pause handshake, consumer loop,
-//! and resampler come from Handy (`src-tauri/src/audio_toolkit/audio/` at
-//! commit 8f9cf53c); `handy_reference.rs` is a frozen copy the equivalence
-//! test holds them to. What changed and why is in DESIGN.md ("Extraction
-//! from Handy", "Regression strategy") and TODO.md.
+//! The capture engine module hub. The engine itself handles the
+//! real-time OS callback and safely gets the data onto an ordinary
+//! thread so applications can do whatever processing they need.
 //!
-//! - `transport`: the real-time callback and the atomics it shares.
-//! - `delivery`: the delivery thread (Handy's consumer loop) and the sink.
-//! - `engine`: the device thread, watchdog, and start/stop/close.
-//! - `resampler`: K-channel resampling and exact chunking.
+//! The engine will resample into the format specified and deliver
+//! fixed size AudioChunks
+//!
+//! It also watches for errors and issues on the capture side and
+//! reports them appropriately.
 
 pub(crate) mod delivery;
 pub(crate) mod engine;

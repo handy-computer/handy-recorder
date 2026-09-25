@@ -3,9 +3,6 @@ use std::time::Duration;
 
 use crate::InputDevice;
 
-/// Everything that can go wrong, with enough context for a log line or a bug
-/// report to say exactly what happened.
-///
 /// Follows `std::io::Error`: match on [`Error::kind`] to decide what to do,
 /// and log the whole value (`Display`) to explain it, e.g.
 /// "AirPods Pro (CoreAudio) disconnected 12.4 s into the stream:
@@ -95,19 +92,16 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// What happened, for application logic.
-///
-/// Expected failures (a device disappearing, permission denied) and library
-/// or application bugs (`Processing`, `SinkStalled`) are separate kinds, so
-/// one is never mistaken for the other.
+/// The types of errors the library will deliver
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ErrorKind {
-    // From `open`.
+    // From `open`. 
     /// No such device, or no input device at all.
     DeviceUnavailable,
     /// Another application has exclusive use of the device.
     DeviceBusy,
+    /// Permission denied to record audio devices, given by the OS
     PermissionDenied,
     /// A `sample_rate` or `frames_per_chunk` the library cannot produce.
     UnsupportedFormat,

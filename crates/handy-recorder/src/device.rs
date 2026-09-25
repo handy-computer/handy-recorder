@@ -53,12 +53,9 @@ pub fn permission_status() -> Permission {
 pub(crate) fn platform_permission_status() -> Permission {
     use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
 
-    // SAFETY: AVMediaTypeAudio is an immutable framework constant.
     let Some(audio) = (unsafe { AVMediaTypeAudio }) else {
         return Permission::Unknown;
     };
-    // SAFETY: audio is a valid media type (video or audio are the only ones
-    // that do not raise).
     let status = unsafe { AVCaptureDevice::authorizationStatusForMediaType(audio) };
     match status {
         AVAuthorizationStatus::Authorized => Permission::Granted,

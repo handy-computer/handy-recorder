@@ -469,8 +469,8 @@ fn the_failure_handler_is_called_once_even_when_it_panics() {
     let fake = fake(16_000, 1);
     let calls = Arc::new(Mutex::new(0));
     let counted = Arc::clone(&calls);
-    let recorder: Recorder<CollectingSink> = Recorder::open_with(
-        Arc::new(fake.clone()),
+    let recorder: Recorder<CollectingSink> = support::open_handled(
+        &fake,
         passthrough(),
         Some(Box::new(move |_| {
             *counted.lock().unwrap() += 1;
@@ -497,8 +497,8 @@ fn the_failure_handler_can_stop_and_close_the_recorder() {
     let slot: Arc<Mutex<Option<Recorder<Chunks>>>> = Arc::new(Mutex::new(None));
     let (done_tx, done_rx) = mpsc::channel();
     let handler_slot = Arc::clone(&slot);
-    let recorder = Recorder::open_with(
-        Arc::new(fake.clone()),
+    let recorder = support::open_handled(
+        &fake,
         passthrough(),
         Some(Box::new(move |_| {
             let recorder = handler_slot.lock().unwrap().take().unwrap();

@@ -1,12 +1,11 @@
 use crate::{Error, InputDevice};
 
-/// How to open a recorder. Every field is optional; `RecorderConfig::default()`
-/// opens the system default device and delivers its audio unchanged.
+/// Config to open a Recroder with.
+/// Every field is optional; `RecorderConfig::default()` opens the system
+/// default device and delivers its audio unchanged.
 ///
 /// The device always runs at the format the OS has it set to. These fields
-/// describe what the sink receives; the library converts (channel routing,
-/// resampling, chunking) and never changes anything about the device, except
-/// where `take_headset` asks it to.
+/// describe what the sink receives.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RecorderConfig {
     /// An `InputDevice::id` from `list_input_devices`. `None` opens the
@@ -22,16 +21,14 @@ pub struct RecorderConfig {
     /// delivers about 10 ms per call. Set it only if the sink needs a fixed
     /// size, such as a VAD model that takes exactly 512 samples.
     pub frames_per_chunk: Option<usize>,
-    /// macOS only: while recording from a Bluetooth headset, open a silent output
-    /// stream running on the headset. For AirPods this will pull them over
-    /// to get the audio stream. Before the device is active there will
-    /// be digital silence.
+    /// When set to True the library will attempt to move Bluetooth devices
+    /// (AirPods) over to the Recorder. This is MacOS only and a no-op on
+    /// other platforms.
     pub take_headset: bool,
 }
 
 impl RecorderConfig {
-    /// Speech capture: 16 kHz, mixed to mono, 480-frame (30 ms) chunks, from
-    /// the system default device.
+    /// Common ASR speech capture configuration
     pub fn speech() -> Self {
         Self {
             device: None,
@@ -49,11 +46,9 @@ pub enum Channels {
     /// All device channels, interleaved.
     #[default]
     All,
-    /// The arithmetic average of all device channels. Can attenuate devices
-    /// with unused channels or cancel opposite-polarity channels.
+    /// Average of all device channels.
     MixToMono,
-    /// One zero-based device channel. Out of range is
-    /// `ErrorKind::InvalidChannel` from `open`.
+    /// Integer (0 indexed) of which channel you want.
     Only(u16),
 }
 
@@ -64,13 +59,12 @@ pub struct Format {
     pub channels: u16,
 }
 
-/// What a recorder opened. Useful for display and logging.
+/// What a recorder opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecorderInfo {
-    /// The device that is recording, including when `RecorderConfig::device`
-    /// was `None`.
+    /// The device used for recording
     pub device: InputDevice,
-    /// What the device runs at: whatever the OS has it set to.
+    /// What the device runs at
     pub device_format: Format,
     /// What the sink receives.
     pub format: Format,
@@ -79,11 +73,10 @@ pub struct RecorderInfo {
     pub frames_per_chunk: usize,
 }
 
-/// What ended a recording. The first failure wins.
+/// What ended a recording.
 #[derive(Debug, Clone)]
 pub enum EndReason {
-    /// The application called `stop`; nothing ended the recording earlier.
-    /// Says nothing about dropped audio: `Stopped::is_complete` checks both.
+    /// The application called `stop`
     StopCalled,
     /// The recorder failed during the recording. Carries the same error the
     /// failure handler received and `start` returns from then on. The audio up

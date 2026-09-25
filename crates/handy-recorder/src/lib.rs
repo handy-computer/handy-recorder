@@ -7,31 +7,11 @@
 //!
 //! # Concepts
 //!
-//! - A [`Recorder`] is "the microphone is on." It can stay open (warm) across
-//!   many recordings.
-//! - A recording is "the audio between [`Recorder::start`] and
-//!   [`Recorder::stop`]." One at a time; while none is active, captured audio
-//!   is discarded.
+//! - A [`Recorder`] when opened warms the selected microphone. When start
+//!   is called, the application will begin recieving AudioChunks from the Sink
 //! - A [`Sink`] is application code that receives the recording's audio as
 //!   fixed-size [`AudioChunk`]s. It is lent to the library by `start` and
 //!   handed back by `stop`.
-//! - `stop` returns a [`Stopped`]: the sink, how the recording ended, and
-//!   whether any audio was lost. Partial success is normal; `stop` returns
-//!   `Err` only when the sink cannot be given back.
-//!
-//! # Failures
-//!
-//! A failure ends what it broke. Device-side failures (unplugged, stalled,
-//! invalidated) end the recorder and its active recording; a sink panic ends
-//! only the recording. A failed recorder stays failed: `start` returns its
-//! error, and the application opens a new recorder to continue. Every
-//! [`Error`] says what happened ([`Error::kind`]), on which device, when, and
-//! the platform's own message.
-//!
-//! Open with [`Recorder::open_with_failure_handler`] to learn of a failure
-//! the moment it happens. Without it, a failure surfaces only at the next
-//! `start` or `stop`, which in an application where the user or the sink
-//! decides when to stop can be never.
 //!
 //! # Example
 //!
@@ -74,9 +54,8 @@ pub use sink::{AudioChunk, CollectingSink, Sink};
 pub use types::{Channels, EndReason, Format, RecorderConfig, RecorderInfo};
 
 use std::fmt;
-use std::sync::Arc;
 
-use backend::{Backend, cpal::CpalBackend};
+use backend::cpal::CpalBackend;
 use capture::engine::{Engine, Timeouts};
 
 // ---------------------------------------------------------------------------
@@ -111,7 +90,9 @@ impl<S: Sink> Recorder<S> {
     /// [`open_with_failure_handler`](Self::open_with_failure_handler)
     /// to capture failures
     pub fn open(config: RecorderConfig) -> Result<Self, Error> {
-        Self::open_with(CpalBackend::shared(), config, None, Timeouts::default())
+        Ok(Self {
+            engine: Engine::open(CpalBackend::shared(), config, None, Timeouts::default())?,
+        })
     }
 
     /// `open`, plus a function called the moment this recorder fails. The
@@ -120,24 +101,13 @@ impl<S: Sink> Recorder<S> {
         config: RecorderConfig,
         handler: impl FnOnce(Error) + Send + 'static,
     ) -> Result<Self, Error> {
-        Self::open_with(
-            CpalBackend::shared(),
-            config,
-            Some(Box::new(handler)),
-            Timeouts::default(),
-        )
-    }
-
-    /// `open` with a chosen backend and internal bounds (the fake backend
-    /// and short timeouts in tests).
-    pub(crate) fn open_with(
-        backend: Arc<dyn Backend>,
-        config: RecorderConfig,
-        handler: Option<Box<dyn FnOnce(Error) + Send + 'static>>,
-        timeouts: Timeouts,
-    ) -> Result<Self, Error> {
         Ok(Self {
-            engine: Engine::open(backend, config, handler, timeouts)?,
+            engine: Engine::open(
+                CpalBackend::shared(),
+                config,
+                Some(Box::new(handler)),
+                Timeouts::default(),
+            )?,
         })
     }
 
@@ -158,12 +128,6 @@ impl<S: Sink> Recorder<S> {
 
     /// Ends the recording and hands back the sink.
     ///
-    /// Briefly pauses the callback after the block it is writing, delivers
-    /// all audio up to that block, flushes the resampler tail, and resumes
-    /// capture before returning, so the recorder keeps running for the next
-    /// `start`. If the recorder has already failed, the recording ended at
-    /// the failure point and `stop` returns without waiting for a callback.
-    ///
     /// A recording that ended on its own (the recorder failed, the sink
     /// panicked) still waits here for its `stop`, and a new `start` fails
     /// with `AlreadyRecording` until then.
@@ -174,12 +138,6 @@ impl<S: Sink> Recorder<S> {
     /// `SinkStalled` if the sink never returned and is lost; after
     /// `SinkStalled` the slot is released and the recorder has failed. To
     /// cancel a recording, stop it and drop the result.
-    ///
-    /// An incomplete recording (see [`Stopped::is_complete`]) is also logged
-    /// at `warn` level with its end reason and dropped-frame count, so it is
-    /// never silent even if the application does not check. Every recording's
-    /// diagnostics (overrun episodes, time to first audio, frame counts) are
-    /// logged at `debug`.
     pub fn stop(&self) -> Result<Stopped<S>, Error> {
         self.engine.stop()
     }
@@ -238,10 +196,7 @@ pub struct Stopped<S> {
     /// before it.
     pub end_reason: EndReason,
     /// Frames the device produced during the recording that were lost
-    /// because the ring was full, usually because the sink was slow. Only the
-    /// library can see these: the sink receives the audio on either side of
-    /// the gap with nothing to mark it. Approximate at the recording's edges:
-    /// a drop racing `start` or `stop` may be counted on either side.
+    /// because the ring was full, usually because the sink was slow.
     pub dropped_frames: u64,
 }
 

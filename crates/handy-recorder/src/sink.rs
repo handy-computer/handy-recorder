@@ -20,8 +20,7 @@ pub trait Sink: Send + 'static {
     fn process_chunk(&mut self, chunk: AudioChunk<'_>);
 }
 
-/// Lets a recorder take `Box<dyn Sink>`. The orphan rule stops applications
-/// from writing this themselves.
+/// Lets a recorder take `Box<dyn Sink>`.
 impl<S: Sink + ?Sized> Sink for Box<S> {
     fn process_chunk(&mut self, chunk: AudioChunk<'_>) {
         (**self).process_chunk(chunk);

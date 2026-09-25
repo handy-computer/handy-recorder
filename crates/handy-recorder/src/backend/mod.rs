@@ -1,10 +1,6 @@
-//! The seam between the capture engine and the platform.
-//!
-//! All platform access goes through [`Backend`]: enumerate devices, open one,
-//! build and start its input stream, and report stream errors. No CPAL type
-//! crosses it, so the engine and its tests run against [`fake`] exactly as
-//! they run against [`cpal`](self::cpal), and a backend can change (another
-//! CPAL version on one target, a different macOS backend) in one file.
+/// The capture engine talks to the microphone through the Backend trait
+/// instead of calling CPAL directly. In production that trait is implemented by
+/// cpal.rs, and in tests by fake.rs
 
 pub(crate) mod cpal;
 #[cfg(test)]

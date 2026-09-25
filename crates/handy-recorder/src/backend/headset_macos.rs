@@ -48,7 +48,7 @@ pub(crate) fn bluetooth_output_uid(input_uid: &str) -> Option<String> {
             )
             .is_empty()
     };
-    // The documented link. AirPods Pro 3 (macOS 27) list only themselves.
+    // The documented link.
     let related = ids(
         input,
         kAudioDevicePropertyRelatedDevices,
