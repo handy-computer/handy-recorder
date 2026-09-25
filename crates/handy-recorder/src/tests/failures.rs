@@ -168,7 +168,12 @@ fn a_slow_sink_and_a_stream_still_running_after_failure_do_not_hold_up_stop() {
         }
     }
     let fake = fake(16_000, 1);
-    let recorder: Recorder<Slow> = open(&fake, passthrough());
+    // Draining the full ring through this sink takes about 0.4 s, and much
+    // longer on a loaded CI runner, where each 2 ms sleep overshoots. The
+    // deadline only has to be finite: before the fix, stop never finished.
+    let mut t = timeouts();
+    t.stop = Duration::from_secs(10);
+    let recorder: Recorder<Slow> = open_with(&fake, passthrough(), t).unwrap();
     // The failed stream's teardown hangs, so its callback keeps writing
     // far faster than the sink consumes.
     let gate = fake.hang_teardown();
