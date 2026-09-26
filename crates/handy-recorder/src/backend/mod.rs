@@ -1,11 +1,14 @@
 /// The capture engine talks to the microphone through the Backend trait
 /// instead of calling CPAL directly. In production that trait is implemented by
-/// cpal.rs, and in tests by fake.rs
+/// `cpal/`, and in tests by fake.rs. Everything platform-specific lives
+/// under this module: reading platform errors (`cpal/error.rs`) and
+/// permission (`permission.rs`) included.
 pub(crate) mod cpal;
 #[cfg(test)]
 pub(crate) mod fake;
 #[cfg(target_os = "macos")]
 mod headset_macos;
+pub(crate) mod permission;
 
 use std::{borrow::Cow, fmt};
 
@@ -23,6 +26,11 @@ pub(crate) trait Backend: Send + Sync + 'static {
     /// Microphone permission, as `crate::permission_status` reports it. A
     /// synchronous read that never prompts.
     fn permission_status(&self) -> Permission;
+
+    /// Whether the platform opens a denied microphone and delivers silence
+    /// (CoreAudio) rather than refusing the stream (WASAPI refuses it at
+    /// open and fails a running one)
+    fn denial_is_silent(&self) -> bool;
 }
 
 /// A resolved device whose input stream has not been built yet.

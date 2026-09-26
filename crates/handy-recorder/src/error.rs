@@ -93,7 +93,24 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// The types of errors the library will deliver
+/// What went wrong, and so what the application should do.
+///
+/// | Kind | What to do |
+/// |---|---|
+/// | `DeviceUnavailable`, `DeviceBusy`, `OpenTimedOut` | Try again, or let the user pick another device. |
+/// | `PermissionDenied` | Send the user to the system's privacy settings, then open a new recorder. |
+/// | `UnsupportedFormat`, `InvalidChannel` | Change the [`RecorderConfig`](crate::RecorderConfig). |
+/// | `NoAudio`, `DeviceLost`, `StreamInvalidated`, `Stalled`, `Backend` | Open a new recorder; this one stays failed. |
+/// | `AlreadyRecording`, `NotRecording`, `StopFromSink`, `SinkStalled` | A bug in the application. |
+/// | `Processing` | A bug in this library; please report it. |
+/// | `CloseTimedOut` | Nothing to recover; log it. The platform may hold the device until the process exits. |
+/// | Anything else (the enum is non-exhaustive) | Treat as a failed recorder. |
+///
+/// A recorder that fails while open reports it three times: to the failure
+/// handler, from every later `start`, and in `stop`'s
+/// [`EndReason::RecorderFailed`](crate::EndReason), which still carries the
+/// audio captured before the failure. [`Error::detail`] is the platform's
+/// message, for logs; do not match on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ErrorKind {
@@ -102,7 +119,8 @@ pub enum ErrorKind {
     DeviceUnavailable,
     /// Another application has exclusive use of the device.
     DeviceBusy,
-    /// Permission denied to record audio devices, given by the OS
+    /// Microphone access is off in the system's privacy settings. From
+    /// `open`, or while open if access is revoked.
     PermissionDenied,
     /// A `sample_rate` or `frames_per_chunk` the library cannot produce.
     UnsupportedFormat,
@@ -114,13 +132,15 @@ pub enum ErrorKind {
     // A recorder failing. The recorder stays failed; open a new one.
     /// The device opened but never delivered audio.
     NoAudio,
-    /// The device disappeared: unplugged, Bluetooth dropped.
+    /// The device disappeared: unplugged, disabled, or Bluetooth dropped.
+    /// Also a Windows Audio service restart.
     DeviceLost,
-    /// The stream can no longer run as built even though the device may
-    /// still exist: its configuration changed, or the sound server restarted.
+    /// The stream can no longer run as built though the device may still
+    /// exist: its configuration or the default device changed, or the sound
+    /// server restarted.
     StreamInvalidated,
-    /// The device was delivering audio, then stopped without reporting an
-    /// error.
+    /// The device stopped delivering audio without an error, or the system
+    /// slept during the recording.
     Stalled,
     /// The sink stopped returning. A bug in the application's sink; the sink
     /// is lost.

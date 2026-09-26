@@ -39,35 +39,13 @@ pub enum Permission {
     Granted,
     Denied,
     NotDetermined,
-    /// The platform has no meaningful proactive answer (Windows, Linux).
-    /// Denial surfaces as `Error::PermissionDenied` from `open`.
+    /// The platform has no meaningful proactive answer (Linux, Windows when
+    /// its privacy settings cannot be read). Denial surfaces as
+    /// `Error::PermissionDenied` from `open`.
     Unknown,
 }
 
 /// Microphone permission status. A synchronous read; never prompts.
 pub fn permission_status() -> Permission {
-    platform_permission_status()
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn platform_permission_status() -> Permission {
-    use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
-
-    let Some(audio) = (unsafe { AVMediaTypeAudio }) else {
-        return Permission::Unknown;
-    };
-    let status = unsafe { AVCaptureDevice::authorizationStatusForMediaType(audio) };
-    match status {
-        AVAuthorizationStatus::Authorized => Permission::Granted,
-        // Restricted: blocked by policy (parental controls, MDM); the user
-        // cannot grant it either.
-        AVAuthorizationStatus::Denied | AVAuthorizationStatus::Restricted => Permission::Denied,
-        AVAuthorizationStatus::NotDetermined => Permission::NotDetermined,
-        _ => Permission::Unknown,
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn platform_permission_status() -> Permission {
-    Permission::Unknown
+    crate::backend::permission::permission_status()
 }

@@ -6,10 +6,7 @@ use std::sync::atomic::Ordering;
 
 use rtrb::RingBuffer;
 
-use super::{
-    CaptureTransportState, Routing, drain_available_samples, is_microphone_access_denied,
-    is_no_input_device_error, write_input_to_ring,
-};
+use super::{CaptureTransportState, Routing, drain_available_samples, write_input_to_ring};
 
 #[test]
 fn callback_writes_mono_samples() {
@@ -161,44 +158,6 @@ fn ring_wraparound_preserves_both_read_slices_in_order() {
         .copied()
         .collect::<Vec<_>>();
     assert_eq!(ordered, [4.0, 5.0, 6.0, 7.0, 8.0]);
-}
-
-#[test]
-fn detects_access_is_denied() {
-    assert!(is_microphone_access_denied("Access is denied"));
-}
-
-#[test]
-fn detects_permission_denied() {
-    assert!(is_microphone_access_denied("permission denied"));
-}
-
-#[test]
-fn detects_windows_error_code() {
-    assert!(is_microphone_access_denied("WASAPI error: 0x80070005"));
-}
-
-#[test]
-fn does_not_match_unrelated_errors() {
-    assert!(!is_microphone_access_denied("device not found"));
-}
-
-#[test]
-fn detects_no_input_device() {
-    assert!(is_no_input_device_error("No input device found"));
-}
-
-#[test]
-fn detects_coreaudio_config_error() {
-    assert!(is_no_input_device_error(
-        "Failed to fetch preferred config: A backend-specific error has occurred: An unknown error unknown to the coreaudio-rs API occurred"
-    ));
-}
-
-#[test]
-fn does_not_match_other_errors_for_no_device() {
-    assert!(!is_no_input_device_error("permission denied"));
-    assert!(!is_no_input_device_error("device not found"));
 }
 
 #[test]

@@ -35,6 +35,9 @@ struct State {
     teardown_gate: Option<Gate>,
     /// `None` reads as `Granted`.
     permission: Option<Permission>,
+    /// Behave like WASAPI (denial fails the stream) instead of CoreAudio
+    /// (denial delivers silence).
+    denial_fails_stream: bool,
     /// Every `hold_headset` call, in order.
     headset_holds: Vec<bool>,
 }
@@ -123,6 +126,10 @@ impl FakeBackend {
         self.shared.state.lock().unwrap().permission = Some(permission);
     }
 
+    pub fn set_denial_fails_stream(&self) {
+        self.shared.state.lock().unwrap().denial_fails_stream = true;
+    }
+
     pub fn is_streaming(&self) -> bool {
         self.shared.state.lock().unwrap().stream.is_some()
     }
@@ -144,6 +151,10 @@ impl Backend for FakeBackend {
             .unwrap()
             .permission
             .unwrap_or(Permission::Granted)
+    }
+
+    fn denial_is_silent(&self) -> bool {
+        !self.shared.state.lock().unwrap().denial_fails_stream
     }
 
     fn list_input_devices(&self) -> Result<Vec<InputDevice>, BackendError> {

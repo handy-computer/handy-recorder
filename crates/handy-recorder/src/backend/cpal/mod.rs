@@ -7,7 +7,10 @@ use std::{
     time::Instant,
 };
 
+mod error;
+
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use error::{map_error, map_error_during};
 
 use super::{
     Backend, BackendError, BackendErrorKind, DataCallback, DeviceFormat, ErrorCallback,
@@ -121,7 +124,13 @@ fn enumerate(
 
 impl Backend for CpalBackend {
     fn permission_status(&self) -> Permission {
-        crate::device::platform_permission_status()
+        super::permission::permission_status()
+    }
+
+    fn denial_is_silent(&self) -> bool {
+        // Linux reports no permission status, so the answer does not matter
+        // there.
+        cfg!(target_os = "macos")
     }
 
     fn list_input_devices(&self) -> Result<Vec<InputDevice>, BackendError> {
@@ -134,6 +143,7 @@ impl Backend for CpalBackend {
     fn open_device(&self, id: Option<&str>) -> Result<Box<dyn OpenDevice>, BackendError> {
         // TODO(review): see TODO.md, "Device enumeration on every open".
         let host = &self.host;
+        let resolve_started = Instant::now();
         let (mut info, device) = match id {
             Some(id) => enumerate(host, false)?
                 .into_iter()
@@ -145,33 +155,42 @@ impl Backend for CpalBackend {
                     )
                 })?,
             None => {
-                let device = host.default_input_device().ok_or_else(|| {
+                let default = host.default_input_device().ok_or_else(|| {
                     BackendError::new(
                         BackendErrorKind::DeviceNotAvailable,
                         "No input device found",
                     )
                 })?;
-                let id = device.id().ok();
-                let info = enumerate(host, false)
+                let id = default.id().ok();
+                // Open the device the default resolves to now, not the
+                // default itself: WASAPI fails a stream opened on the default
+                // (`StreamInvalidated`) when the user picks another default,
+                // while a stream on a specific device stays on it, as on
+                // CoreAudio. Falls back to the default where it cannot be
+                // resolved.
+                enumerate(host, false)
                     .ok()
                     .and_then(|devices| {
                         devices
                             .into_iter()
                             .find(|(_, d)| id.is_some() && d.id().ok() == id)
                     })
-                    .map(|(info, _)| info)
-                    .unwrap_or_else(|| InputDevice {
-                        id: id.as_ref().map_or_else(String::new, ToString::to_string),
-                        name: device_name(&device),
-                        occurrence: 0,
-                        backend: host.id().name().to_owned(),
-                        is_default: true,
-                        id_is_stable: id.is_some_and(|id| id_is_stable(id.host())),
-                        channels: None,
-                    });
-                (info, device)
+                    .unwrap_or_else(|| {
+                        let info = InputDevice {
+                            id: id.as_ref().map_or_else(String::new, ToString::to_string),
+                            name: device_name(&default),
+                            occurrence: 0,
+                            backend: host.id().name().to_owned(),
+                            is_default: true,
+                            id_is_stable: id.is_some_and(|id| id_is_stable(id.host())),
+                            channels: None,
+                        };
+                        (info, default)
+                    })
             }
         };
+
+        log::debug!("resolve_device={:?}", resolve_started.elapsed());
 
         let config_started = Instant::now();
         // The format the OS has the device set to: the WASAPI mix format,
@@ -373,95 +392,9 @@ where
     )
 }
 
-/// Prefixes the message with the step that failed, which
-/// `is_no_input_device_error` matches on.
-fn map_error_during(step: &str, e: cpal::Error) -> BackendError {
-    BackendError::new(map_kind(e.kind()), format!("{step}: {e}"))
-}
-
-fn map_error(e: cpal::Error) -> BackendError {
-    let kind = map_kind(e.kind());
-    if kind.stream_survives() {
-        // May be reported repeatedly on the audio thread (xruns under load),
-        // so it carries a fixed description instead of an allocated message.
-        let message = match kind {
-            BackendErrorKind::Xrun => "A buffer overrun or underrun occurred",
-            _ => "Real-time scheduling was refused for the audio thread",
-        };
-        return BackendError::new(kind, message);
-    }
-    BackendError::new(kind, e.to_string())
-}
-
-fn map_kind(kind: cpal::ErrorKind) -> BackendErrorKind {
-    match kind {
-        cpal::ErrorKind::DeviceNotAvailable => BackendErrorKind::DeviceNotAvailable,
-        cpal::ErrorKind::DeviceBusy => BackendErrorKind::DeviceBusy,
-        cpal::ErrorKind::PermissionDenied => BackendErrorKind::PermissionDenied,
-        cpal::ErrorKind::UnsupportedConfig => BackendErrorKind::UnsupportedConfig,
-        cpal::ErrorKind::StreamInvalidated => BackendErrorKind::StreamInvalidated,
-        cpal::ErrorKind::DeviceChanged => BackendErrorKind::DeviceChanged,
-        cpal::ErrorKind::Xrun => BackendErrorKind::Xrun,
-        cpal::ErrorKind::RealtimeDenied => BackendErrorKind::RealtimeDenied,
-        _ => BackendErrorKind::Other,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
-
     use super::*;
-
-    #[test]
-    fn errors_the_stream_survives_are_classified_without_allocating() {
-        for (cpal_kind, kind) in [
-            (cpal::ErrorKind::Xrun, BackendErrorKind::Xrun),
-            (
-                cpal::ErrorKind::RealtimeDenied,
-                BackendErrorKind::RealtimeDenied,
-            ),
-        ] {
-            let error = map_error(cpal::Error::with_message(cpal_kind, "detail"));
-            assert_eq!(error.kind, kind);
-            assert!(error.kind.stream_survives());
-            assert!(matches!(error.message, Cow::Borrowed(_)));
-        }
-    }
-
-    #[test]
-    fn errors_that_end_the_stream_keep_the_platform_message() {
-        for (cpal_kind, kind) in [
-            (
-                cpal::ErrorKind::DeviceNotAvailable,
-                BackendErrorKind::DeviceNotAvailable,
-            ),
-            (
-                cpal::ErrorKind::StreamInvalidated,
-                BackendErrorKind::StreamInvalidated,
-            ),
-            (
-                cpal::ErrorKind::DeviceChanged,
-                BackendErrorKind::DeviceChanged,
-            ),
-            (
-                cpal::ErrorKind::PermissionDenied,
-                BackendErrorKind::PermissionDenied,
-            ),
-            (cpal::ErrorKind::BackendError, BackendErrorKind::Other),
-        ] {
-            let error = map_error(cpal::Error::with_message(cpal_kind, "AUDCLNT_E_X"));
-            assert_eq!(error.kind, kind);
-            assert!(!error.kind.stream_survives());
-            assert_eq!(error.message, "AUDCLNT_E_X");
-        }
-        let error = map_error_during(
-            "Failed to build input stream",
-            cpal::Error::with_message(cpal::ErrorKind::PermissionDenied, "Unauthorized"),
-        );
-        assert_eq!(error.kind, BackendErrorKind::PermissionDenied);
-        assert_eq!(error.message, "Failed to build input stream: Unauthorized");
-    }
 
     /// Real hardware: lists input devices, then opens each by ID and reads
     /// its format. Run with `cargo test -- --ignored --nocapture`.

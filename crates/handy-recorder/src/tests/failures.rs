@@ -531,11 +531,6 @@ fn open_failures_map_to_their_kinds_and_leave_no_stream() {
             ErrorKind::PermissionDenied,
         ),
         (
-            BackendErrorKind::Other,
-            "WASAPI error: 0x80070005",
-            ErrorKind::PermissionDenied,
-        ),
-        (
             BackendErrorKind::DeviceNotAvailable,
             "No input device found",
             ErrorKind::DeviceUnavailable,
@@ -558,7 +553,8 @@ fn open_failures_map_to_their_kinds_and_leave_no_stream() {
             .err()
             .expect("open fails");
         assert_eq!(error.kind(), kind, "{message}");
-        assert_eq!(error.detail(), Some(message));
+        // The platform's message, after where to grant access for a denial.
+        assert!(error.detail().unwrap().ends_with(message), "{error}");
         assert_eq!(
             error.elapsed(),
             None,
@@ -641,7 +637,13 @@ fn denied_microphone_access_fails_open_instead_of_recording_silence() {
         .expect("open fails");
     assert_eq!(error.kind(), ErrorKind::PermissionDenied);
     assert_eq!(error.device().unwrap().name, "Fake Mic");
-    assert!(error.detail().unwrap().contains("Privacy & Security"));
+    assert!(
+        error
+            .detail()
+            .unwrap()
+            .to_lowercase()
+            .contains("privacy & security")
+    );
     assert_eq!(fake.streams_started(), 0, "no stream was built");
 
     // Not yet asked: open proceeds (macOS shows its prompt).
@@ -674,6 +676,110 @@ fn access_revoked_while_open_fails_the_recorder_at_start() {
     );
 }
 
+/// WASAPI refuses a denied stream itself, so the privacy settings (which can
+/// be stale, or overridden by policy) never block an open or a start there.
+#[test]
+fn a_denied_status_does_not_block_a_platform_that_refuses_denied_streams() {
+    let fake = fake(16_000, 1);
+    fake.set_denial_fails_stream();
+    fake.set_permission(crate::Permission::Denied);
+    let recorder: Recorder<Chunks> = open(&fake, passthrough());
+    start(&recorder, Chunks::default());
+    assert!(fake.push(&ramp(0, 100)));
+    let stopped = stop_with_boundary(&recorder, &fake, &[0.5f32]).unwrap();
+    assert!(stopped.is_complete());
+}
+
+/// Windows fails a running stream with AUDCLNT_E_DEVICE_INVALIDATED when
+/// access is revoked, the same code as an unplug (measured on Windows 11).
+#[test]
+fn access_revoked_while_recording_is_reported_as_denied_not_as_an_unplug() {
+    let fake = fake(16_000, 1);
+    fake.set_denial_fails_stream();
+    let (recorder, failures) = open_notified::<Chunks>(&fake, passthrough(), timeouts());
+    start(&recorder, Chunks::default());
+    assert!(fake.push(&ramp(0, 100)));
+
+    fake.set_permission(crate::Permission::Denied);
+    assert!(fake.report_error(lost()));
+    let error = failures
+        .recv_timeout(support::WAIT)
+        .expect("failure handler");
+    assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+    let detail = error.detail().unwrap();
+    assert!(
+        detail.to_lowercase().contains("privacy & security"),
+        "{detail}"
+    );
+    assert!(detail.contains("kAudioHardwareBadDeviceError"), "{detail}");
+
+    let stopped = recorder.stop().expect("stop");
+    assert_eq!(
+        recorder_failed(&stopped.end_reason).kind(),
+        ErrorKind::PermissionDenied
+    );
+    assert_eq!(stopped.sink.valid_frames(), 100);
+}
+
+#[test]
+fn an_unplug_with_access_granted_is_still_a_lost_device() {
+    let fake = fake(16_000, 1);
+    fake.set_denial_fails_stream();
+    let (recorder, failures) = open_notified::<Chunks>(&fake, passthrough(), timeouts());
+    assert!(fake.report_error(lost()));
+    let error = failures
+        .recv_timeout(support::WAIT)
+        .expect("failure handler");
+    assert_eq!(error.kind(), ErrorKind::DeviceLost);
+    drop(recorder);
+}
+
+/// A platform refusal at open keeps its message and says where to grant
+/// access.
+#[test]
+fn a_refused_open_says_where_to_grant_access() {
+    let fake = fake(16_000, 1);
+    fake.set_denial_fails_stream();
+    fake.fail_next_open(BackendError::new(
+        BackendErrorKind::PermissionDenied,
+        "Access is denied. (os error -2147024891)",
+    ));
+    let error = open_with::<Chunks>(&fake, passthrough(), timeouts())
+        .err()
+        .expect("open fails");
+    assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+    let detail = error.detail().unwrap();
+    assert!(
+        detail.to_lowercase().contains("privacy & security"),
+        "{detail}"
+    );
+    assert!(
+        detail.ends_with("Access is denied. (os error -2147024891)"),
+        "{detail}"
+    );
+}
+
+/// WASAPI flags a discontinuity on every stream's first read; it arrives
+/// before any audio and must not be reported against the recording.
+#[test]
+fn an_xrun_before_the_first_audio_is_not_counted() {
+    let fake = fake(16_000, 1);
+    let recorder: Recorder<Chunks> = open(&fake, passthrough());
+    start(&recorder, Chunks::default());
+    let xruns = || {
+        recorder
+            .engine
+            .shared
+            .xruns
+            .load(std::sync::atomic::Ordering::Relaxed)
+    };
+    assert!(fake.report_error(BackendError::new(BackendErrorKind::Xrun, "xrun")));
+    assert_eq!(xruns(), 0);
+    assert!(fake.push(&ramp(0, 100)));
+    assert!(fake.report_error(BackendError::new(BackendErrorKind::Xrun, "xrun")));
+    assert_eq!(xruns(), 1);
+}
+
 /// macOS stops callbacks for tens of seconds of awake time around system
 /// sleep, then resumes them (measured on hardware with the `sleep-raw`
 /// probe).
@@ -699,6 +805,33 @@ fn a_stall_while_idle_is_not_a_failure() {
     let stopped = stop_with_boundary(&recorder, &fake, &[0.5f32]).unwrap();
     assert!(stopped.is_complete());
     assert_eq!(stopped.sink.valid_frames(), 501);
+}
+
+/// Windows suspends the whole process during sleep. On wake the callbacks
+/// can resume, and `stop` run, before the watchdog's next check; the
+/// recording must still fail instead of coming back complete with a gap.
+#[test]
+fn a_stop_before_the_watchdog_notices_a_suspension_fails_the_recording() {
+    let fake = fake(16_000, 1);
+    let mut t = timeouts();
+    t.stall = Duration::from_millis(100);
+    // The watchdog never ticks on its own: "suspended" throughout.
+    t.watchdog_tick = Duration::from_secs(60);
+    let recorder = open_with::<Chunks>(&fake, passthrough(), t).expect("open");
+    start(&recorder, Chunks::default());
+    assert!(fake.push(&ramp(0, 160)));
+    *recorder.engine.shared.watchdog_checked_at.lock().unwrap() = Instant::now();
+    thread::sleep(Duration::from_millis(200));
+
+    // "Awake": callbacks resume, and stop runs first. The recording fails
+    // before the pause handshake, so none is requested.
+    assert!(fake.push(&ramp(160, 160)));
+    let stopped = recorder.stop().expect("stop");
+    let error = recorder_failed(&stopped.end_reason);
+    assert_eq!(error.kind(), ErrorKind::Stalled);
+    assert!(error.detail().unwrap().contains("suspended"), "{error}");
+    // The audio before the gap is kept.
+    assert!(stopped.sink.valid_frames() >= 160);
 }
 
 #[test]

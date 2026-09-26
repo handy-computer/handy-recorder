@@ -22,10 +22,7 @@ use rtrb::RingBuffer;
 
 use super::FrameResampler;
 use super::delivery::{self, DeliveryCmd, DeliveryPipeline};
-use super::transport::{
-    CaptureTransportState, Routing, is_microphone_access_denied, is_no_input_device_error,
-    write_input_to_ring,
-};
+use super::transport::{CaptureTransportState, Routing, write_input_to_ring};
 use crate::backend::{Backend, BackendError, BackendErrorKind, InputData, InputStream};
 use crate::{
     Channels, Error, ErrorKind, Format, InputDevice, Permission, RecorderConfig, RecorderInfo,
@@ -111,12 +108,15 @@ pub(crate) struct Shared {
     pub survived_errors: AtomicU64,
     /// Xruns since the current recording started: audio the platform lost
     /// before the callback, of unknown length (WASAPI discontinuities, ALSA
-    /// overruns, CoreAudio overloads). Logged at `stop`, not counted in
-    /// `dropped_frames`.
+    /// overruns, CoreAudio overloads), except one before the stream's first
+    /// audio. Logged at `stop`, not counted in `dropped_frames`.
     pub xruns: AtomicU64,
     /// When the current recording started; `None` while idle. The watchdog
     /// fails the recorder on a stall only while this is set.
     recording_since: Mutex<Option<Instant>>,
+    /// When the watchdog last checked. Held while it fails a recording that
+    /// spanned a suspension, so `stop` sees either the gap or the failure.
+    pub(crate) watchdog_checked_at: Mutex<Instant>,
     device_tx: mpsc::Sender<DeviceMsg>,
 }
 
@@ -131,6 +131,7 @@ impl Shared {
             survived_errors: AtomicU64::new(0),
             xruns: AtomicU64::new(0),
             recording_since: Mutex::new(None),
+            watchdog_checked_at: Mutex::new(Instant::now()),
             device_tx,
         }
     }
@@ -261,7 +262,7 @@ impl<S: Sink> Engine<S> {
                             *state = OpenState::Done;
                             let _ = init_tx.send(Ok(opened));
                             drop(state);
-                            run_device(stream, shared, device_rx, timeouts, handler);
+                            run_device(&*backend, stream, shared, device_rx, timeouts, handler);
                         }
                         Err(error) => {
                             *state = OpenState::Done;
@@ -377,7 +378,9 @@ impl<S: Sink> Engine<S> {
         }
         // Access revoked while the recorder was open: macOS keeps the stream
         // running and delivers exact zeros, so the recorder fails instead.
-        if self.backend.permission_status() == Permission::Denied {
+        // (WASAPI fails the stream itself; see `runtime_error`.)
+        if self.backend.denial_is_silent() && self.backend.permission_status() == Permission::Denied
+        {
             let error = self.shared.fail(permission_denied(
                 self.shared.error(ErrorKind::PermissionDenied),
             ));
@@ -418,6 +421,25 @@ impl<S: Sink> Engine<S> {
                 return Err(Error::new(ErrorKind::NotRecording));
             }
             *slot = Slot::Stopping;
+        }
+        // On wake, callbacks can resume before the watchdog's next check;
+        // without this, a stop in that window would pass the handshake and
+        // return the recording as complete, gap and all. Skipped once the
+        // recorder has failed: the watchdog stops checking then, so the gap
+        // since its last check is not a suspension.
+        let recording_since = *self.shared.recording_since.lock().unwrap();
+        if self.shared.failure().is_none() {
+            let checked_at = self.shared.watchdog_checked_at.lock().unwrap();
+            if let Suspension::DuringRecording(gap) = suspension(
+                *checked_at,
+                Instant::now(),
+                recording_since,
+                self.timeouts.stall,
+            ) {
+                let error = suspended_during_recording(&self.shared, gap, self.timeouts.stall);
+                log::warn!("{error}");
+                self.shared.fail(error);
+            }
         }
         let result = self.collect();
         if self.take_headset {
@@ -551,37 +573,44 @@ fn default_frames_per_chunk(sample_rate: u32) -> usize {
     ((sample_rate as usize + 50) / 100).max(1)
 }
 
+/// Says where to grant access, keeping the platform's message when there is
+/// one.
 fn permission_denied(error: Error) -> Error {
-    error.with_detail(
-        "microphone access is denied for this app (macOS: System Settings > Privacy & Security > Microphone)",
-    )
+    let hint = if cfg!(target_os = "windows") {
+        "microphone access is denied for desktop apps (Settings > Privacy & security > Microphone: \
+         \"Microphone access\", \"Let apps access your microphone\", and \"Let desktop apps access \
+         your microphone\" must all be on)"
+    } else {
+        "microphone access is denied for this app (macOS: System Settings > Privacy & Security > Microphone)"
+    };
+    let detail = match error.detail() {
+        Some(platform) => format!("{hint}: {platform}"),
+        None => hint.to_owned(),
+    };
+    error.with_detail(detail)
 }
 
-/// Maps a platform error during open, or while listing devices.
+/// Maps a platform error during open, or while listing devices. Maps the
+/// kind only; the backend has already classified the platform's message.
 pub(crate) fn open_error(error: BackendError, device: Option<&InputDevice>) -> Error {
-    let message = error.message.to_string();
-    let kind = if error.kind == BackendErrorKind::PermissionDenied
-        || is_microphone_access_denied(&message)
-    {
-        ErrorKind::PermissionDenied
-    } else if error.kind == BackendErrorKind::DeviceNotAvailable
-        || is_no_input_device_error(&message)
-    {
-        ErrorKind::DeviceUnavailable
-    } else if error.kind == BackendErrorKind::DeviceBusy {
-        ErrorKind::DeviceBusy
-    } else {
-        ErrorKind::Backend
+    let kind = match error.kind {
+        BackendErrorKind::PermissionDenied => ErrorKind::PermissionDenied,
+        BackendErrorKind::DeviceNotAvailable => ErrorKind::DeviceUnavailable,
+        BackendErrorKind::DeviceBusy => ErrorKind::DeviceBusy,
+        _ => ErrorKind::Backend,
     };
-    let error = Error::new(kind).with_detail(message);
-    match device {
-        Some(device) => error.with_device(device.clone()),
-        None => error,
+    let mut error = Error::new(kind).with_detail(error.message.into_owned());
+    if let Some(device) = device {
+        error = error.with_device(device.clone());
     }
+    if kind == ErrorKind::PermissionDenied {
+        error = permission_denied(error);
+    }
+    error
 }
 
 /// Maps a platform error reported while the stream runs.
-fn runtime_error(shared: &Shared, error: BackendError) -> Error {
+fn runtime_error(backend: &dyn Backend, shared: &Shared, error: BackendError) -> Error {
     let kind = match error.kind {
         BackendErrorKind::DeviceNotAvailable => ErrorKind::DeviceLost,
         BackendErrorKind::StreamInvalidated | BackendErrorKind::DeviceChanged => {
@@ -590,7 +619,19 @@ fn runtime_error(shared: &Shared, error: BackendError) -> Error {
         BackendErrorKind::PermissionDenied => ErrorKind::PermissionDenied,
         _ => ErrorKind::Backend,
     };
-    shared.error(kind).with_detail(error.message.into_owned())
+    // Revoking access fails a WASAPI stream with the same code as an unplug
+    // (AUDCLNT_E_DEVICE_INVALIDATED, measured on Windows 11)
+    let kind = if backend.permission_status() == Permission::Denied {
+        ErrorKind::PermissionDenied
+    } else {
+        kind
+    };
+    let error = shared.error(kind).with_detail(error.message.into_owned());
+    if kind == ErrorKind::PermissionDenied {
+        permission_denied(error)
+    } else {
+        error
+    }
 }
 
 /// Runs on the device thread: resolves the device, validates and builds the
@@ -608,8 +649,8 @@ fn open_stream(
     let info = device.info().clone();
     let _ = shared.device.set(info.clone());
     // macOS opens a denied microphone and delivers exact zeros; say so
-    // instead of recording silence.
-    if backend.permission_status() == Permission::Denied {
+    // instead of recording silence. WASAPI refuses the stream below.
+    if backend.denial_is_silent() && backend.permission_status() == Permission::Denied {
         return Err(permission_denied(shared.error(ErrorKind::PermissionDenied)));
     }
     let device_format = device.format();
@@ -695,7 +736,11 @@ fn open_stream(
         // counted; others go to the device thread, which fails the recorder.
         if error.kind.stream_survives() {
             error_shared.survived_errors.fetch_add(1, Ordering::Relaxed);
-            if error.kind == BackendErrorKind::Xrun {
+            // WASAPI flags a discontinuity on a stream's first read, whatever
+            // happened, and CPAL passes it on. It arrives before that read's
+            // audio with no audio delivered yet, nothing can be missing.
+            let delivered = error_shared.transport.callbacks.load(Ordering::Relaxed) > 0;
+            if error.kind == BackendErrorKind::Xrun && delivered {
                 error_shared.xruns.fetch_add(1, Ordering::Relaxed);
             }
         } else {
@@ -741,6 +786,7 @@ fn open_stream(
 /// The device thread after a successful open: holds the stream, watches for
 /// failures, tears down, and notifies.
 fn run_device(
+    backend: &dyn Backend,
     stream: Box<dyn InputStream>,
     shared: Arc<Shared>,
     device_rx: mpsc::Receiver<DeviceMsg>,
@@ -748,12 +794,16 @@ fn run_device(
     mut handler: Option<Handler>,
 ) {
     let mut stream = Some(stream);
-    let mut watchdog = Watchdog::new(Instant::now());
+    let now = Instant::now();
+    // Opening took a while before the watchdog existed; that is not a
+    // suspension.
+    *shared.watchdog_checked_at.lock().unwrap() = now;
+    let mut watchdog = Watchdog::new(now);
     loop {
         match device_rx.recv_timeout(timeouts.watchdog_tick) {
             Ok(DeviceMsg::StreamError(error)) => {
                 if stream.is_some() {
-                    let error = runtime_error(&shared, error);
+                    let error = runtime_error(backend, &shared, error);
                     shared.fail(error);
                 }
             }
@@ -836,6 +886,31 @@ impl Watchdog {
 
     fn check(&mut self, shared: &Shared, timeouts: &Timeouts) {
         let now = Instant::now();
+        let recording_since = *shared.recording_since.lock().unwrap();
+        let suspended = {
+            let mut checked_at = shared.watchdog_checked_at.lock().unwrap();
+            let suspended = suspension(*checked_at, now, recording_since, timeouts.stall);
+            *checked_at = now;
+            // Failed under the lock: `stop` reads the same timestamp.
+            if let Suspension::DuringRecording(gap) = suspended {
+                let error = suspended_during_recording(shared, gap, timeouts.stall);
+                log::warn!("watchdog tripped: {error}");
+                shared.fail(error);
+            }
+            suspended
+        };
+        if let Suspension::WhileIdle(gap) = suspended {
+            // Every thread of the process was frozen, so the gap is evidence
+            // of nothing: it must not count toward `NoAudio`, `SinkStalled`,
+            // or an idle stall.
+            log::info!(
+                "the process was suspended for {:.1} s while idle (system sleep?)",
+                gap.as_secs_f64()
+            );
+            self.opened_at += gap;
+            self.last_callback_at += gap;
+            self.last_heartbeat_at += gap;
+        }
         let callbacks = shared.transport.callbacks.load(Ordering::Relaxed);
         if callbacks != self.callbacks {
             if self.idle_stall_logged {
@@ -854,6 +929,9 @@ impl Watchdog {
             self.last_heartbeat_at = now;
         }
 
+        if matches!(suspended, Suspension::DuringRecording(_)) {
+            return;
+        }
         let error = if callbacks == 0 {
             let waited = now - self.opened_at;
             (waited >= timeouts.no_audio).then(|| {
@@ -870,7 +948,6 @@ impl Watchdog {
             // of unknown length. Silence counts from the later of the last
             // callback and the recording's start, so a recording started
             // just after wake gets the full bound for audio to resume.
-            let recording_since = *shared.recording_since.lock().unwrap();
             match recording_since {
                 Some(since) => {
                     let silent = now - self.last_callback_at.max(since);
@@ -910,5 +987,86 @@ impl Watchdog {
             log::warn!("watchdog tripped: {error}");
             shared.fail(error);
         }
+    }
+}
+
+fn suspended_during_recording(shared: &Shared, gap: Duration, stall: Duration) -> Error {
+    shared.error(ErrorKind::Stalled).with_detail(format!(
+        "the process was suspended for {:.1} s during a recording (system sleep?), \
+         so the audio has a gap (bound {:.1} s)",
+        gap.as_secs_f64(),
+        stall.as_secs_f64()
+    ))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Suspension {
+    None,
+    WhileIdle(Duration),
+    DuringRecording(Duration),
+}
+
+/// Whether the watchdog's thread was frozen since its last check, and so the
+/// whole process with it. Windows (Modern Standby) suspends the process
+/// during sleep: callbacks and the watchdog stop together and resume
+/// together, so on wake a callback can arrive before the next check and the
+/// stall check never sees the gap. `Instant` counts sleep there, so a gap
+/// between checks of at least the stall bound, during a recording that began
+/// before it, is the same gap in the audio. macOS stops callbacks before it
+/// suspends the process, and its `Instant` excludes sleep; the stall check
+/// catches it instead.
+// TODO(review): see TODO.md, "Sleep on Linux".
+fn suspension(
+    last_check_at: Instant,
+    now: Instant,
+    recording_since: Option<Instant>,
+    stall: Duration,
+) -> Suspension {
+    let gap = now.saturating_duration_since(last_check_at);
+    if gap < stall {
+        Suspension::None
+    } else if recording_since.is_some_and(|since| since <= last_check_at) {
+        Suspension::DuringRecording(gap)
+    } else {
+        // Idle, or a recording started after wake, before this check.
+        Suspension::WhileIdle(gap)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_suspension_fails_only_a_recording_that_spans_it() {
+        let stall = Duration::from_secs(5);
+        let before = Instant::now();
+        let last_check = before + Duration::from_secs(1);
+        let woke = last_check + Duration::from_secs(100);
+        let gap = Duration::from_secs(100);
+
+        assert_eq!(
+            suspension(last_check, woke, Some(before), stall),
+            Suspension::DuringRecording(gap)
+        );
+        assert_eq!(
+            suspension(last_check, woke, None, stall),
+            Suspension::WhileIdle(gap)
+        );
+        // Started after wake, before this check ran.
+        assert_eq!(
+            suspension(last_check, woke, Some(woke), stall),
+            Suspension::WhileIdle(gap)
+        );
+        // An ordinary tick.
+        assert_eq!(
+            suspension(
+                last_check,
+                last_check + Duration::from_millis(50),
+                Some(before),
+                stall
+            ),
+            Suspension::None
+        );
     }
 }

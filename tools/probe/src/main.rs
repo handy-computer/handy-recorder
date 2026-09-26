@@ -922,29 +922,14 @@ fn probe_sleep_wake(opts: &Opts) -> Result<Outcome, Error> {
     let opened = open(opts.device.as_deref())?;
     record(&opened, 1.0)?;
     if opts.recording {
-        opened
-            .recorder
-            .start(ProbeSink::new())
-            .map_err(Error::from)?;
+        return sleep_while_recording(&opened);
     }
     prompt(&format!(
-        "Put the machine to sleep for at least 30 s ({}), wake it, then come back here. The recorder is open{}.",
+        "Put the machine to sleep for at least 30 s ({}), wake it, then come back here. The recorder is open and idle.",
         how("sleep"),
-        if opts.recording {
-            " and recording"
-        } else {
-            " and idle"
-        }
     ));
     let failure = opened.failures.try_recv().ok();
-    let recorded = if opts.recording {
-        opened
-            .recorder
-            .stop()
-            .map(|s| (s.sink.describe(), s.end_reason))
-    } else {
-        record(&opened, 2.0).map(|s| (s.sink.describe(), s.end_reason))
-    };
+    let recorded = record(&opened, 2.0).map(|s| (s.sink.describe(), s.end_reason));
     let slept = opened.opened_at.elapsed();
     match failure {
         None => match recorded {
@@ -971,6 +956,43 @@ fn probe_sleep_wake(opts: &Opts) -> Result<Outcome, Error> {
     }
 }
 
+/// `sleep-wake --recording`: a sleep ends the recording by design (`Stalled`,
+/// or a device loss). What must not happen is a recording that carries on
+/// with a gap and no failure. The gap is measured against the wall clock,
+/// because `Instant` excludes sleep on macOS and Linux.
+fn sleep_while_recording(opened: &Opened) -> Result<Outcome, Error> {
+    let started = std::time::SystemTime::now();
+    opened
+        .recorder
+        .start(ProbeSink::new())
+        .map_err(Error::from)?;
+    prompt(&format!(
+        "Put the machine to sleep for at least 30 s ({}), wake it, then come back here. The recorder is open and recording.",
+        how("sleep"),
+    ));
+    let failure = opened.failures.try_recv().ok();
+    let stopped = match opened.recorder.stop() {
+        Ok(stopped) => stopped,
+        Err(e) => return Ok(Outcome::Fail(format!("stop failed: {e}"))),
+    };
+    let wall = started.elapsed().unwrap_or_default().as_secs_f64();
+    let missing = wall - stopped.sink.seconds();
+    let detail = format!(
+        "{} over {wall:.1} s of wall time ({missing:.1} s missing)",
+        stopped.sink.describe()
+    );
+    let reported = failure
+        .map(|(_, e)| e)
+        .or_else(|| end_error(&stopped).cloned());
+    Ok(match reported {
+        Some(e) => Outcome::Info(format!("the recording ended across sleep: {e}; {detail}")),
+        None if missing > 5.0 => Outcome::Fail(format!(
+            "no failure reported, but the recording has a gap: {detail}"
+        )),
+        None => Outcome::Pass(format!("recorded across sleep without a gap: {detail}")),
+    })
+}
+
 fn probe_permission(opts: &Opts) -> Result<Outcome, Error> {
     let status = permission_status();
     say!("permission_status: {status:?}");
@@ -980,6 +1002,8 @@ fn probe_permission(opts: &Opts) -> Result<Outcome, Error> {
             how("permission")
         ));
     }
+    // Read again: the operator may have changed the setting at the prompt.
+    let status = permission_status();
     match open(opts.device.as_deref()) {
         Err(e) => Ok(Outcome::Info(format!(
             "status {status:?}; open failed: {e} (kind {:?})",
@@ -1007,12 +1031,14 @@ fn probe_hold(opts: &Opts) -> Result<Outcome, Error> {
     let opened = open(opts.device.as_deref())?;
     let stopped = record(&opened, secs)?;
     let failure = opened.failures.try_recv().ok().map(|(_, e)| e.to_string());
-    // Peak per second, to see whether audio kept flowing throughout.
+    // Peak per second, to see whether audio kept flowing throughout. In
+    // scientific notation so a quiet but real second (a DSP noise gate can
+    // hold the floor near -100 dBFS) does not round to an exact zero.
     let per_second: Vec<String> = stopped
         .sink
         .timeline
         .chunks(10)
-        .map(|c| format!("{:.4}", c.iter().fold(0.0f32, |m, &p| m.max(p))))
+        .map(|c| format!("{:.1e}", c.iter().fold(0.0f32, |m, &p| m.max(p))))
         .collect();
     say!(
         "HOLD complete={} seconds={:.2} peak={:.4} failure={:?} per_second={}",

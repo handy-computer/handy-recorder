@@ -22,6 +22,11 @@ cpal = "0.18.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 cpal = { version = "0.18.2", features = ["pulseaudio"] }
 
+# Microphone permission status (the privacy settings' registry values). The
+# same crate and version cpal's WASAPI host uses.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = ["Win32_System_Registry"] }
+
 # Microphone permission status (AVCaptureDevice authorization), and finding a
 # Bluetooth headset's output device for `take_headset` (the CoreAudio and
 # CoreFoundation bindings cpal already uses).

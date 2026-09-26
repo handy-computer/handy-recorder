@@ -8,10 +8,11 @@
 //! # Concepts
 //!
 //! - A [`Recorder`] when opened warms the selected microphone. When start
-//!   is called, the application will begin recieving AudioChunks from the Sink
+//!   is called, the application will begin receiving AudioChunks from the Sink.
 //! - A [`Sink`] is application code that receives the recording's audio as
 //!   fixed-size [`AudioChunk`]s. It is lent to the library by `start` and
 //!   handed back by `stop`.
+//! - Errors: match on [`ErrorKind`]; its docs say what to do for each.
 //!
 //! # Example
 //!

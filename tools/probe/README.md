@@ -90,29 +90,34 @@ DESIGN.md). AirPods open at 24 kHz in call mode; that is expected.
 
 ### Windows
 
-The first real run of the WASAPI backend. Pay attention to:
+Done on a ThinkPad L14 Gen 2, Windows 11, 2026-09-25 (see "Results so
+far"). Still to do: Bluetooth (5, 5b, 6), a desktop PC (S3 sleep instead
+of Modern Standby), and exclusive mode. Notes:
 
-- **Permission (13):** turn off Settings > Privacy & security > Microphone >
-  "Let desktop apps access your microphone". Expect `PermissionDenied` from
-  `open`. The library recognizes it only by the WASAPI message
-  (`E_ACCESSDENIED`), so this is the most important Windows check.
-- **Disconnect (3-5):** also try disabling the device in Settings > System >
-  Sound > the device > Disable, as a variant of unplugging.
-- **Default change (8):** CPAL reports a default-device change on a stream
-  opened on the default device as `StreamInvalidated`. The library still
-  opens the default through CPAL's default-device handle, so expect the
-  recorder to fail with `StreamInvalidated` until it opens the resolved
-  device instead (TODO.md, "Default device changing mid-recording"). Record
-  what happens.
+- **Permission (13):** Settings > Privacy & security > Microphone has
+  three switches, and turning off any one makes WASAPI refuse a desktop
+  app's stream: "Microphone access" (registry: HKLM `ConsentStore\microphone`),
+  "Let apps access your microphone" (HKCU, same key; despite the name it
+  covers desktop apps), and "Let desktop apps access your microphone"
+  (HKCU `...\microphone\NonPackaged`). `permission_status` reads all three.
+  Try each one alone.
+- **Disabling the device** (Settings > System > Sound > the device >
+  Don't allow; Allow again under "All sound devices") behaves like
+  unplugging: `DeviceLost`, AUDCLNT_E_DEVICE_INVALIDATED.
+- **Disconnect (3-5):** wait for the device to be back before pressing
+  Enter at "Reconnect"; the probe retries the reopen for a while, but a
+  replugged USB device can take seconds to reappear.
 - **Bluetooth (5, 6):** the headset switches to its hands-free profile when
   the microphone opens; note the rate `list`/`slow-start` report.
-- **Sleep (9-11):** laptops with Modern Standby may keep audio running;
-  record the gaps `sleep-raw` reports.
-- **Service restart (12):** administrator PowerShell,
-  `Restart-Service audiosrv -Force`.
+- **Sleep (9-11):** Modern Standby suspends the whole process, callbacks and
+  watchdog alike. `sleep-raw` reports the gap.
+- **Service restart (12):** an administrator PowerShell,
+  `Restart-Service audiosrv -Force` (a normal one fails with "Cannot open
+  audiosrv service").
 - Optional: another app with exclusive control of the device (Sound Control
   Panel > Recording > device > Properties > Advanced) should make `open`
-  fail with `DeviceBusy`.
+  fail with `DeviceBusy`. Needs an app that captures in exclusive mode; the
+  probe has none yet.
 
 ### Linux
 
@@ -196,3 +201,45 @@ them):
   (`DeviceLost`).
 - Permission denied: `open` fails with `PermissionDenied` (after the fix;
   before it, recordings were silent).
+
+Windows 11 (build 26200), ThinkPad L14 Gen 2 (i5-1135G7, Modern Standby
+only), built-in Intel Smart Sound mic array and USB-C EarPods, both 48 kHz
+2 ch, 2026-09-25:
+
+- `auto`: all PASS on the built-in mic. First open in a process 25-400 ms
+  (almost all of it building the stream; about 400 ms early in the
+  session, 25 ms later), 70-80 ms after that; first audio 15-30 ms after
+  the stream starts. Resolving the device (enumeration) costs 2.5-7 ms.
+- The built-in mic's DSP gates a quiet room: the floor falls from about
+  -55 dBFS to about -100 dBFS after about 2 s, without reaching exact
+  zeros. (It made `second-process` report digital silence until the probe
+  stopped rounding peaks.)
+- Every stream reports one xrun: WASAPI's discontinuity flag on its first
+  read, which CPAL's `device_position != 0` guard misses on these devices.
+- Disconnects (EarPods, unplugged): `DeviceLost` (AUDCLNT_E_DEVICE_INVALIDATED)
+  in about 2 s, recording and idle, audio before it kept; reopen works. A
+  recorder opened about 1 s after the replug got 1.9 s of exact zeros
+  before real audio (as once on macOS). Disabling the device in Settings
+  is the same (`DeviceLost`), and so is re-enabling it (1.0 s of zeros
+  once). While the device's page in Sound settings was open, a recording
+  on it got 3-6 s of exact zeros before the loss, with no failure; the same
+  happened (3.5 s) during `default-change`, not during plain unplugs.
+- Sharing: another process, a recording app in both orders, and a Google
+  Meet call (both orders, a new process during the call) all work.
+- Default-input change: before the fix, `StreamInvalidated`; after opening
+  the resolved device, the recorder stays on its device.
+- Sleep: Modern Standby suspends the process; callbacks stop at sleep and
+  resume on wake (108 s gap), and `Instant` counts the sleep. An idle
+  recorder survives. Before the fix a recording across sleep carried on
+  with a 114 s gap and no failure; now it ends with `Stalled` ("the process
+  was suspended").
+- Audio service restart: the stream fails with `DeviceLost`
+  (AUDCLNT_E_DEVICE_INVALIDATED) or `StreamInvalidated` (ERROR_NOT_FOUND),
+  varying between runs; a new recorder in the same process works at once.
+- Permission: turning off any one of the three switches makes `open` fail
+  with `PermissionDenied` (E_ACCESSDENIED from WASAPI), "Let apps access
+  your microphone" included. `permission_status` reads `Denied` for each
+  (`Granted` with all on). Turning off "Microphone access" or "Let apps
+  access your microphone" while a recorder is open (`hold --secs 30`)
+  fails its stream with AUDCLNT_E_DEVICE_INVALIDATED, the unplug code;
+  before the fix it read as `DeviceLost`, now as `PermissionDenied`.
