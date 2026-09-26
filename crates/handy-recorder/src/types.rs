@@ -1,11 +1,8 @@
 use crate::{Error, InputDevice};
 
-/// Config to open a Recroder with.
-/// Every field is optional; `RecorderConfig::default()` opens the system
-/// default device and delivers its audio unchanged.
-///
-/// The device always runs at the format the OS has it set to. These fields
-/// describe what the sink receives.
+/// What the sink receives. The device always runs at its OS format;
+/// `RecorderConfig::default()` opens the default device and delivers its audio
+/// unchanged.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RecorderConfig {
     /// An `InputDevice::id` from `list_input_devices`. `None` opens the
@@ -16,19 +13,16 @@ pub struct RecorderConfig {
     pub sample_rate: Option<u32>,
     /// Which channels the sink receives. Default: all of them.
     pub channels: Channels,
-    /// How many frames each `process_chunk` call receives. A frame is one
-    /// sample per channel, so at 16 kHz mono, 480 frames is 30 ms. `None`
-    /// delivers about 10 ms per call. Set it only if the sink needs a fixed
-    /// size, such as a VAD model that takes exactly 512 samples.
+    /// Frames per `process_chunk` call (one sample per channel). `None` is
+    /// about 10 ms; set it when the sink needs a fixed size, like a VAD.
     pub frames_per_chunk: Option<usize>,
-    /// When set to True the library will attempt to move Bluetooth devices
-    /// (AirPods) over to the Recorder. This is MacOS only and a no-op on
-    /// other platforms.
+    /// Moves a Bluetooth headset (AirPods) to this device while recording.
+    /// macOS only.
     pub take_headset: bool,
 }
 
 impl RecorderConfig {
-    /// Common ASR speech capture configuration
+    /// 16 kHz mono, 30 ms chunks: the usual ASR input.
     pub fn speech() -> Self {
         Self {
             device: None,
@@ -48,7 +42,7 @@ pub enum Channels {
     All,
     /// Average of all device channels.
     MixToMono,
-    /// Integer (0 indexed) of which channel you want.
+    /// One channel, zero-based.
     Only(u16),
 }
 
@@ -62,25 +56,19 @@ pub struct Format {
 /// What a recorder opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecorderInfo {
-    /// The device used for recording
     pub device: InputDevice,
-    /// What the device runs at
     pub device_format: Format,
     /// What the sink receives.
     pub format: Format,
-    /// Frames in every chunk handed to the sink: the requested
-    /// `frames_per_chunk`, or the resolved ~10 ms default.
+    /// The requested `frames_per_chunk`, or the resolved ~10 ms default.
     pub frames_per_chunk: usize,
 }
 
 /// What ended a recording.
 #[derive(Debug, Clone)]
 pub enum EndReason {
-    /// The application called `stop`
     StopCalled,
-    /// The recorder failed during the recording. Carries the same error the
-    /// failure handler received and `start` returns from then on. The audio up
-    /// to the failure was delivered.
+    /// The recorder failed; the audio up to the failure was delivered.
     RecorderFailed(Error),
     /// The sink panicked; carries the panic message. The recorder is fine.
     SinkPanicked(String),

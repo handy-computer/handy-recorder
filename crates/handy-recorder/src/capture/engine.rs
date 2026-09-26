@@ -1,12 +1,9 @@
-//! The recorder engine: opens the device on its own thread, starts the
-//! delivery thread, supervises both, and implements start, stop, and close.
+//! The recorder engine: start, stop, and close over three threads.
 //!
-//! Threads per open recorder:
-//! - device thread: creates, owns, and drops the platform stream; runs the
-//!   watchdog (`watchdog.rs`); turns stream errors into failures. Never runs
+//! - device: owns the platform stream and runs the watchdog. Never runs
 //!   application code, so it can always close the stream.
-//! - delivery thread (`delivery.rs`): drains the ring and runs the sink.
-//! - notification thread: short-lived, calls the failure handler once.
+//! - delivery (`delivery.rs`): drains the ring and runs the sink.
+//! - notification: short-lived, calls the failure handler once.
 
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
@@ -31,8 +28,7 @@ use crate::{
     Sink, StartError, Stopped,
 };
 
-// Two seconds of ring capacity absorbs consumer stalls without adding latency
-// during normal 10 ms drains.
+/// Absorbs consumer stalls.
 const AUDIO_RING_SECONDS: usize = 2;
 
 /// Output rates outside this range are `UnsupportedFormat`.
@@ -41,7 +37,6 @@ const MAX_OUTPUT_RATE: u32 = 768_000;
 /// Chunks longer than this are `UnsupportedFormat`.
 const MAX_CHUNK_SECONDS: usize = 10;
 
-/// Timeout struct primarily for testing.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Timeouts {
     /// `open` waits this long for the platform to build and start the stream.
@@ -59,17 +54,14 @@ pub(crate) struct Timeouts {
     /// A delivery thread (usually a sink) that makes no progress for this
     /// long fails the recorder with `SinkStalled`.
     pub heartbeat: Duration,
-    /// `stop` waits this long for the callback to acknowledge the pause
-    /// otherwise the stream stalled.
+    /// `stop` waits this long for the callback to acknowledge the pause.
     pub pause_ack: Duration,
-    /// `stop`'s overall deadline. Must exceed `pause_ack`, so a stopped
-    /// callback is classified as `Stalled` before it expires.
+    /// `stop`'s overall deadline. Exceeds `pause_ack`, so a stall is seen first.
     pub stop: Duration,
     /// How often the device thread's watchdog checks progress.
     pub watchdog_tick: Duration,
 }
 
-// Production constants for timeouts
 impl Default for Timeouts {
     fn default() -> Self {
         Self {
@@ -106,16 +98,12 @@ pub(crate) struct Shared {
     started_at: OnceLock<Instant>,
     /// Advanced by the delivery thread on every loop and drain.
     pub heartbeat: AtomicU64,
-    /// Xruns since the current recording started: audio the platform lost
-    /// before the callback, of unknown length (WASAPI discontinuities, ALSA
-    /// overruns, CoreAudio overloads), except one before the stream's first
-    /// audio. Logged at `stop`, not counted in `dropped_frames`.
+    /// Xruns this recording: audio the platform lost before the callback.
+    /// Logged at `stop`, not counted in `dropped_frames`.
     pub xruns: AtomicU64,
-    /// When the current recording started; `None` while idle. The watchdog
-    /// fails the recorder on a stall only while this is set.
+    /// When the current recording started; `None` while idle.
     recording_since: Mutex<Option<Instant>>,
-    /// When the watchdog last checked. Held while it fails a recording that
-    /// spanned a suspension, so `stop` sees either the gap or the failure.
+    /// Held while failing on a suspension, so `stop` sees the gap or the failure.
     pub(crate) watchdog_checked_at: Mutex<CheckTime>,
     device_tx: mpsc::Sender<DeviceMsg>,
 }
@@ -319,9 +307,7 @@ impl<S: Sink> Engine<S> {
                 .name("handy-recorder-delivery".into())
                 .spawn(move || {
                     let _exit = delivery_exit_tx;
-                    // Sink panics are caught per chunk, so a panic here is
-                    // the library's, or a sink's `Drop`. Fail now, rather
-                    // than let the heartbeat report it later as a stall.
+                    // Sink panics are caught per chunk, so this one is ours.
                     let run = AssertUnwindSafe(|| delivery::run(pipeline, &shared, delivery_rx));
                     if let Err(payload) = catch_unwind(run) {
                         let error = shared.fail(shared.error(ErrorKind::Processing).with_detail(
@@ -388,9 +374,7 @@ impl<S: Sink> Engine<S> {
         if let Some(error) = self.shared.failure() {
             return Err(StartError { error, sink });
         }
-        // Access revoked while the recorder was open: macOS keeps the stream
-        // running and delivers exact zeros, so the recorder fails instead.
-        // (WASAPI fails the stream itself; see `runtime_error`.)
+        // Revoked while open; see `denial_is_silent`.
         if self.backend.denial_is_silent() && self.backend.permission_status() == Permission::Denied
         {
             let error = self.shared.fail(permission_denied(
@@ -421,8 +405,7 @@ impl<S: Sink> Engine<S> {
     }
 
     pub fn stop(&self) -> Result<Stopped<S>, Error> {
-        // The sink is borrowed by the call it is making, so it cannot be
-        // handed back; waiting for the delivery thread would wait for itself.
+        // Waiting for the delivery thread here would wait for itself.
         if thread::current().id() == self.delivery_thread {
             log::warn!("stop called from inside the sink; the recording continues");
             return Err(Error::new(ErrorKind::StopFromSink));
@@ -469,14 +452,11 @@ impl<S: Sink> Engine<S> {
                         "stop did not complete within {:.1} s",
                         self.timeouts.stop.as_secs_f64()
                     ));
-                // Log the sink as the cause even when an earlier failure
-                // (a lost device, say) stays the recorder's error.
+                // Logged even when an earlier failure stays the recorder's error.
                 log::error!("recording lost: {stalled}");
                 Err(self.shared.fail(stalled))
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                // The delivery thread already failed (a stalled sink the
-                // heartbeat caught) or exited.
                 Err(self.shared.failure().unwrap_or_else(|| {
                     self.shared.fail(
                         self.shared
@@ -520,8 +500,7 @@ impl<S> Engine<S> {
             }
         };
 
-        // Dropping the last handle from inside the sink runs this on the
-        // delivery thread itself, which must not wait for itself.
+        // Dropped from inside the sink: don't wait for ourselves.
         if threads.delivery.thread().id() == current {
             log::debug!("closed from inside the sink; the delivery thread exits after it returns");
         } else {
@@ -567,8 +546,7 @@ fn default_frames_per_chunk(sample_rate: u32) -> usize {
     ((sample_rate as usize + 50) / 100).max(1)
 }
 
-/// Says where to grant access, keeping the platform's message when there is
-/// one.
+/// Adds where to grant access to the platform's message.
 fn permission_denied(error: Error) -> Error {
     let hint = if cfg!(target_os = "windows") {
         "microphone access is denied for desktop apps (Settings > Privacy & security > Microphone: \
@@ -584,8 +562,7 @@ fn permission_denied(error: Error) -> Error {
     error.with_detail(detail)
 }
 
-/// Maps a platform error during open, or while listing devices. Maps the
-/// kind only; the backend has already classified the platform's message.
+/// Maps a platform error during open, or while listing devices.
 pub(crate) fn open_error(error: BackendError, device: Option<&InputDevice>) -> Error {
     let kind = match error.kind {
         BackendErrorKind::PermissionDenied => ErrorKind::PermissionDenied,
@@ -613,10 +590,7 @@ fn runtime_error(backend: &dyn Backend, shared: &Shared, error: BackendError) ->
         BackendErrorKind::PermissionDenied => ErrorKind::PermissionDenied,
         _ => ErrorKind::Backend,
     };
-    // Revoking access fails a WASAPI stream with the same code as an unplug
-    // (AUDCLNT_E_DEVICE_INVALIDATED, measured on Windows 11). Only that case
-    // is relabeled: the status can be stale, and every other kind means what
-    // it says.
+    // WASAPI fails a revoked stream with the unplug code; relabel only that.
     let kind = if kind == ErrorKind::DeviceLost
         && !backend.denial_is_silent()
         && backend.permission_status() == Permission::Denied
@@ -633,8 +607,8 @@ fn runtime_error(backend: &dyn Backend, shared: &Shared, error: BackendError) ->
     }
 }
 
-/// Runs on the device thread: resolves the device, validates and builds the
-/// whole pipeline, then builds and starts the stream.
+/// Runs on the device thread: resolves the device, builds the pipeline, and
+/// starts the stream.
 fn open_stream(
     backend: &dyn Backend,
     config: &RecorderConfig,
@@ -647,8 +621,7 @@ fn open_stream(
         .map_err(|e| open_error(e, None))?;
     let info = device.info().clone();
     let _ = shared.device.set(info.clone());
-    // macOS opens a denied microphone and delivers exact zeros; say so
-    // instead of recording silence. WASAPI refuses the stream below.
+    // See `denial_is_silent`.
     if backend.denial_is_silent() && backend.permission_status() == Permission::Denied {
         return Err(permission_denied(shared.error(ErrorKind::PermissionDenied)));
     }
@@ -690,13 +663,11 @@ fn open_stream(
             ))
     })?;
 
-    // Capacity is a whole number of K-sample frames, so reads and writes
-    // stay frame-aligned across wraparound.
+    // Whole K-sample frames, so reads and writes stay aligned across the wrap.
     let ring_capacity = in_rate as usize * AUDIO_RING_SECONDS * k;
     let (mut producer, mut consumer) = RingBuffer::new(ring_capacity);
 
-    // Touch rtrb's uninitialized pages before the stream starts to reduce
-    // callback page faults. This does not pin them.
+    // Pre-fault the ring's pages before the callback runs.
     {
         let chunk = producer
             .write_chunk(ring_capacity)
@@ -731,13 +702,9 @@ fn open_stream(
     };
     let error_shared = Arc::clone(shared);
     let error = move |error: BackendError| {
-        // May run on the platform audio thread. Survivable errors are not
-        // fatal (xruns are counted); others go to the device thread, which
-        // fails the recorder.
+        // May run on the audio thread: count survivable errors, send the rest.
         if error.kind.stream_survives() {
-            // WASAPI flags a discontinuity on a stream's first read, whatever
-            // happened, and CPAL passes it on. It arrives before that read's
-            // audio with no audio delivered yet, nothing can be missing.
+            // WASAPI flags a discontinuity before any audio; nothing is missing.
             let delivered = error_shared.transport.callbacks.load(Ordering::Relaxed) > 0;
             if error.kind == BackendErrorKind::Xrun && delivered {
                 error_shared.xruns.fetch_add(1, Ordering::Relaxed);
@@ -782,8 +749,7 @@ fn open_stream(
     ))
 }
 
-/// The device thread after a successful open: holds the stream, watches for
-/// failures, tears down, and notifies.
+/// The device thread after a successful open.
 fn run_device(
     backend: &dyn Backend,
     stream: Box<dyn InputStream>,
@@ -806,9 +772,7 @@ fn run_device(
     let Err(payload) = catch_unwind(supervise) else {
         return;
     };
-    // A panic in the backend or the watchdog is the library's. Without the
-    // watchdog nothing would notice the recorder is dead, so fail it,
-    // release the stream, and notify, as for any other failure.
+    // The watchdog died with it, so fail now.
     let error = shared.fail(shared.error(ErrorKind::Processing).with_detail(format!(
         "the device thread panicked: {}",
         panic_message(&*payload)
@@ -883,8 +847,7 @@ fn teardown(stream: &mut Option<Box<dyn InputStream>>) {
     }
 }
 
-/// Calls the failure handler on its own short-lived thread, so a slow or
-/// blocking handler delays nothing but itself.
+/// Calls the handler on its own thread, so a slow one delays nothing else.
 fn notify(handler: Handler, error: Error) {
     let spawned = thread::Builder::new()
         .name("handy-recorder-notify".into())

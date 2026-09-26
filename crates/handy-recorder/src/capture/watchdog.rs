@@ -1,6 +1,5 @@
-//! The device thread's watchdog: detects the failures nothing reports (no
-//! audio after open, callbacks stopping, a delivery thread that stopped
-//! making progress, the process suspended during a recording).
+//! The device thread's watchdog: detects failures nothing reports (no audio,
+//! stalled callbacks or delivery, suspension during a recording).
 
 use std::{
     sync::atomic::Ordering,
@@ -23,8 +22,7 @@ pub(super) struct Watchdog {
 impl Watchdog {
     pub(super) fn new(shared: &Shared) -> Self {
         let now = Instant::now();
-        // Opening took a while before the watchdog existed; that is not a
-        // suspension.
+        // Time spent opening is not a suspension.
         *shared.watchdog_checked_at.lock().unwrap() = CheckTime::now();
         Self {
             opened_at: now,
@@ -43,9 +41,7 @@ impl Watchdog {
         let (suspended, frozen) = {
             let mut checked_at = shared.watchdog_checked_at.lock().unwrap();
             let suspended = suspension(*checked_at, checked, recording_since, timeouts.stall);
-            // How far `Instant` moved while the watchdog was frozen: all of a
-            // sleep where it counts sleep (Windows), little of it where it
-            // does not (Linux).
+            // How far `Instant` moved while frozen (all of a sleep on Windows).
             let frozen = now.saturating_duration_since(checked_at.instant);
             *checked_at = checked;
             // Failed under the lock: `stop` reads the same timestamp.
@@ -57,9 +53,7 @@ impl Watchdog {
             (suspended, frozen)
         };
         if let Suspension::WhileIdle(gap) = suspended {
-            // Every thread of the process was frozen, so the gap is evidence
-            // of nothing: it must not count toward `NoAudio`, `SinkStalled`,
-            // or an idle stall.
+            // The whole process was frozen; don't count the gap against anything.
             log::info!(
                 "the process was suspended for {:.1} s while idle (system sleep?)",
                 gap.as_secs_f64()
@@ -99,12 +93,8 @@ impl Watchdog {
                 ))
             })
         } else {
-            // macOS stops callbacks for tens of seconds of awake time around
-            // system sleep and resumes them after wake, so a stall while idle
-            // is not a failure. During a recording it is: the audio has a gap
-            // of unknown length. Silence counts from the later of the last
-            // callback and the recording's start, so a recording started
-            // just after wake gets the full bound for audio to resume.
+            // macOS pauses callbacks around sleep, so only a recording stalls,
+            // counted from the later of the last callback and its start.
             match recording_since {
                 Some(since) => {
                     let silent = now - self.last_callback_at.max(since);
@@ -147,11 +137,8 @@ impl Watchdog {
     }
 }
 
-/// `stop`'s half of the suspension check. On wake, callbacks can resume
-/// before the watchdog's next check; without this, a stop in that window
-/// would pass the handshake and return the recording as complete, gap and
-/// all. Skipped once the recorder has failed: the watchdog stops checking
-/// then, so the gap since its last check is not a suspension.
+/// Callbacks can resume before the watchdog's next check, so `stop` checks too.
+/// Skipped once failed: the watchdog has stopped checking.
 pub(super) fn fail_if_suspended(shared: &Shared, timeouts: &Timeouts) {
     let recording_since = shared.recording_since();
     if shared.failure().is_some() {
@@ -180,8 +167,7 @@ fn suspended_during_recording(shared: &Shared, gap: Duration, stall: Duration) -
     ))
 }
 
-/// When the watchdog checked, on `Instant` and on a clock that counts time
-/// the system was asleep.
+/// A check time on `Instant` and on a clock that counts sleep.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CheckTime {
     pub instant: Instant,
@@ -204,9 +190,7 @@ impl CheckTime {
     }
 }
 
-/// `Instant` is `CLOCK_MONOTONIC` on Linux, which stops during suspend, and
-/// Linux freezes the process as it suspends (measured with `sleep-raw`:
-/// 54 s asleep, 1.8 s of `Instant`), so only `CLOCK_BOOTTIME` shows the gap.
+/// Linux's `Instant` stops during suspend; `CLOCK_BOOTTIME` doesn't.
 #[cfg(target_os = "linux")]
 fn with_sleep_now() -> Duration {
     let mut ts = libc::timespec {
@@ -218,9 +202,7 @@ fn with_sleep_now() -> Duration {
     Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
 }
 
-/// `Instant` counts sleep on Windows (QPC). On macOS it does not, but
-/// callbacks stop seconds before the process is suspended, so the stall
-/// check sees the sleep instead.
+/// Windows' `Instant` counts sleep; on macOS the stall check sees it instead.
 #[cfg(not(target_os = "linux"))]
 fn with_sleep_now() -> Duration {
     static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
@@ -234,14 +216,8 @@ enum Suspension {
     DuringRecording(Duration),
 }
 
-/// Whether the watchdog's thread was frozen since its last check, and so the
-/// whole process with it. Windows (Modern Standby) and Linux suspend the
-/// process during sleep: callbacks and the watchdog stop together and resume
-/// together, so on wake a callback can arrive before the next check and the
-/// stall check never sees the gap. Measured on a clock that counts sleep
-/// (`CheckTime`), a gap between checks of at least the stall bound, during a
-/// recording that began before it, is the same gap in the audio. macOS stops
-/// callbacks before it suspends the process; the stall check catches it.
+/// Whether the process was frozen since the last check. Windows and Linux
+/// freeze callbacks and watchdog together, so only a sleep clock sees the gap.
 fn suspension(
     last_check: CheckTime,
     now: CheckTime,

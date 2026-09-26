@@ -1,8 +1,6 @@
-/// The capture engine talks to the microphone through the Backend trait
-/// instead of calling CPAL directly. In production that trait is implemented by
-/// `cpal/`, and in tests by fake.rs. Everything platform-specific lives
-/// under this module: reading platform errors (`cpal/error.rs`) and
-/// permission (`permission.rs`) included.
+//! The `Backend` trait between the engine and the platform: `cpal/` in
+//! production, `fake.rs` in tests. Everything platform-specific lives here.
+
 pub(crate) mod cpal;
 #[cfg(test)]
 pub(crate) mod fake;
@@ -19,17 +17,13 @@ use crate::{InputDevice, Permission};
 pub(crate) trait Backend: Send + Sync + 'static {
     fn list_input_devices(&self) -> Result<Vec<InputDevice>, BackendError>;
 
-    /// Resolves `id` (an `InputDevice::id`), or the system default for
-    /// `None`, and reads the format the OS has it set to. Opens no stream.
+    /// Resolves `id`, or the default for `None`, and reads its OS format.
     fn open_device(&self, id: Option<&str>) -> Result<Box<dyn OpenDevice>, BackendError>;
 
-    /// Microphone permission, as `crate::permission_status` reports it. A
-    /// synchronous read that never prompts.
     fn permission_status(&self) -> Permission;
 
-    /// Whether the platform opens a denied microphone and delivers silence
-    /// (CoreAudio) rather than refusing the stream (WASAPI refuses it at
-    /// open and fails a running one)
+    /// Whether a denied microphone delivers silence (CoreAudio) rather than
+    /// failing the stream (WASAPI), so the engine must check permission.
     fn denial_is_silent(&self) -> bool;
 }
 
@@ -37,13 +31,11 @@ pub(crate) trait Backend: Send + Sync + 'static {
 pub(crate) trait OpenDevice {
     fn info(&self) -> &InputDevice;
 
-    /// The format the stream will run at: whatever the OS has the device set
-    /// to. The library never asks for a different one.
+    /// The device's OS format; the library never asks for another.
     fn format(&self) -> DeviceFormat;
 
-    /// Builds the input stream and starts it. `data` runs on the platform's
-    /// real-time thread; `error` may too. Dropping the returned stream stops
-    /// and releases it.
+    /// Builds and starts the stream. `data` runs on the real-time thread;
+    /// `error` may too.
     fn start(
         self: Box<Self>,
         data: DataCallback,
@@ -54,17 +46,11 @@ pub(crate) trait OpenDevice {
 /// A running input stream. Dropping it stops the stream and releases the
 /// device. Not `Send`: it is created, owned, and dropped on one thread.
 pub(crate) trait InputStream {
-    /// Starts or stops holding the device's headset (`take_headset`). Best
-    /// effort: a backend logs what it could not do. A no-op where it does not
-    /// apply.
+    /// Starts or stops holding the headset (`take_headset`). Best effort.
     fn hold_headset(&mut self, _hold: bool) {}
 
-    /// Checks that the device the stream was opened on still exists, where
-    /// the platform does not fail the stream when it goes away: the
-    /// PulseAudio server (PipeWire's included) moves the stream to another
-    /// source instead, with no error. `Err` (`DeviceNotAvailable`) when the
-    /// device is gone. Called on the device thread at every watchdog tick,
-    /// so it must not block.
+    /// `Err` if the device is gone but the stream wasn't failed (PulseAudio
+    /// moves it). Called every watchdog tick; must not block.
     fn check_device(&mut self) -> Result<(), BackendError> {
         Ok(())
     }
@@ -118,8 +104,7 @@ pub(crate) enum InputData<'a> {
     F64(&'a [f64]),
 }
 
-/// A device sample type. The conversion to `f32` is `dasp_sample`'s, the
-/// same conversion `cpal::Sample` uses.
+/// A device sample type, converted to `f32` as `cpal::Sample` does.
 pub(crate) trait InputSample: Copy + Send + 'static {
     fn to_f32(self) -> f32;
     fn wrap(data: &[Self]) -> InputData<'_>;
@@ -145,10 +130,8 @@ input_sample!(
     f32 => F32, f64 => F64
 );
 
-/// A platform error, classified by the backend adapter. The message is the
-/// platform's own, kept verbatim, except for errors the stream survives,
-/// which carry a fixed description so reporting them never allocates on the
-/// audio thread.
+/// A classified platform error. The message is verbatim, except survivable
+/// errors, which use fixed text to avoid allocating on the audio thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BackendError {
     pub kind: BackendErrorKind,
@@ -161,28 +144,22 @@ pub(crate) enum BackendErrorKind {
     DeviceNotAvailable,
     DeviceBusy,
     PermissionDenied,
-    /// The device's format cannot be captured (for example an unsupported
-    /// sample format).
+    /// The device's format can't be captured.
     UnsupportedConfig,
     /// The stream can no longer run as built.
     StreamInvalidated,
-    /// The stream was rerouted to a new default device. The stream keeps
-    /// running, but the library treats this as the end of the recorder: the
-    /// device it reported opening is no longer the one recording, and the
-    /// new one may run at a different format.
-    // TODO(review): see TODO.md, "Default device changing mid-recording".
+    /// Rerouted to a new default. Fails the recorder: it's no longer the
+    /// device that was opened.
     DeviceChanged,
     /// A buffer overrun or underrun; the stream keeps running.
     Xrun,
     /// Real-time scheduling was refused; the stream keeps running.
     RealtimeDenied,
-    /// Anything else.
     Other,
 }
 
 impl BackendErrorKind {
-    /// Whether the recorder carries on after this error: the platform
-    /// documents the stream as still running and nothing about it changed.
+    /// Whether the stream keeps running unchanged after this error.
     pub fn stream_survives(self) -> bool {
         matches!(self, Self::Xrun | Self::RealtimeDenied)
     }

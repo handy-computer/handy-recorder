@@ -1,5 +1,5 @@
-//! Failures over the fake backend: the design's failure-outcomes table,
-//! the watchdog, the failure handler, and bounded waits.
+//! Failures over the fake backend: outcomes, the watchdog, the failure
+//! handler, and bounded waits.
 
 use std::{
     sync::{
@@ -86,10 +86,7 @@ fn device_loss_during_a_recording_keeps_the_audio_and_fails_the_recorder() {
     assert!(failures.try_recv().is_err(), "the handler fires once");
 }
 
-/// PulseAudio (PipeWire included) moves a stream whose source was removed
-/// to another source and reports nothing (measured on Fedora with a USB
-/// microphone and with a virtual source). The recorder must fail as on an
-/// unplug, not record from another microphone.
+/// PulseAudio silently moves a stream off a removed source; fail as on an unplug.
 #[test]
 fn a_device_removed_under_a_running_stream_fails_the_recording() {
     let fake = fake(16_000, 1);
@@ -192,9 +189,7 @@ fn a_slow_sink_and_a_stream_still_running_after_failure_do_not_hold_up_stop() {
         }
     }
     let fake = fake(16_000, 1);
-    // Draining the full ring through this sink takes about 0.4 s, and much
-    // longer on a loaded CI runner, where each 2 ms sleep overshoots. The
-    // deadline only has to be finite: before the fix, stop never finished.
+    // Generous for slow CI; it only has to be finite.
     let mut t = timeouts();
     t.stop = Duration::from_secs(10);
     let recorder: Recorder<Slow> = open_with(&fake, passthrough(), t).unwrap();
@@ -220,8 +215,7 @@ fn a_slow_sink_and_a_stream_still_running_after_failure_do_not_hold_up_stop() {
         pushing.store(false, Ordering::Relaxed);
         stopped
     });
-    // Before the fix, the failure drain chased the callback forever and
-    // stop hit its deadline with `SinkStalled`, losing the recording.
+    // The failure drain must not chase the callback forever.
     let stopped = stopped.expect("stop returns the recording");
     assert_eq!(
         recorder_failed(&stopped.end_reason).kind(),
@@ -755,8 +749,7 @@ fn a_denied_status_does_not_block_a_platform_that_refuses_denied_streams() {
     assert!(stopped.is_complete());
 }
 
-/// Windows fails a running stream with AUDCLNT_E_DEVICE_INVALIDATED when
-/// access is revoked, the same code as an unplug (measured on Windows 11).
+/// Windows fails a revoked stream with the unplug code.
 #[test]
 fn access_revoked_while_recording_is_reported_as_denied_not_as_an_unplug() {
     let fake = fake(16_000, 1);
@@ -813,9 +806,7 @@ fn only_an_unplug_while_denied_is_relabeled_as_denied() {
     }
 }
 
-/// macOS stops callbacks for tens of seconds of awake time around system
-/// sleep, then resumes them (measured on hardware with the `sleep-raw`
-/// probe).
+/// macOS pauses callbacks around sleep, then resumes them.
 #[test]
 fn a_stall_while_idle_is_not_a_failure() {
     let fake = fake(16_000, 1);
@@ -840,9 +831,8 @@ fn a_stall_while_idle_is_not_a_failure() {
     assert_eq!(stopped.sink.valid_frames(), 501);
 }
 
-/// Windows suspends the whole process during sleep. On wake the callbacks
-/// can resume, and `stop` run, before the watchdog's next check; the
-/// recording must still fail instead of coming back complete with a gap.
+/// Windows freezes the process during sleep; `stop` can run before the
+/// watchdog's next check and must still fail the recording.
 #[test]
 fn a_stop_before_the_watchdog_notices_a_suspension_fails_the_recording() {
     let fake = fake(16_000, 1);
@@ -856,8 +846,7 @@ fn a_stop_before_the_watchdog_notices_a_suspension_fails_the_recording() {
     *recorder.engine.shared.watchdog_checked_at.lock().unwrap() = CheckTime::now();
     thread::sleep(Duration::from_millis(200));
 
-    // "Awake": callbacks resume, and stop runs first. The recording fails
-    // before the pause handshake, so none is requested.
+    // "Awake": callbacks resume, and stop runs first.
     assert!(fake.push(&ramp(160, 160)));
     let stopped = recorder.stop().expect("stop");
     let error = recorder_failed(&stopped.end_reason);

@@ -86,8 +86,7 @@ pub(crate) fn run<S: Sink>(
         {
             panic!("injected delivery thread panic");
         }
-        // Avoid sleeping with queued audio; check commands before each bounded
-        // drain so Stop cannot sit behind a multi-second backlog.
+        // Check commands before each bounded drain, so Stop can't wait behind a backlog.
         let mut command = if consumer.slots() > 0 {
             match cmd_rx.try_recv() {
                 Ok(command) => Some(command),
@@ -134,9 +133,7 @@ pub(crate) fn run<S: Sink>(
             };
         }
 
-        // A failure ends the active recording at the failure point: deliver
-        // what was captured before it, flush the tail, and go back to
-        // discarding while the recording waits for its `stop`.
+        // A failure ends the recording here; it then waits for its `stop`.
         if let Some(error) = processor.shared.failure()
             && processor.capturing()
         {
@@ -180,9 +177,7 @@ struct Active<S> {
     input_frames: u64,
     /// Real frames delivered to the sink (the sum of `valid_frames`).
     output_frames: u64,
-    /// Exact digital silence: a real microphone always has a noise floor,
-    /// so long runs of exact zeros mean denied access, a muted device, or
-    /// a stale stream. Reported, never acted on.
+    /// Exact-zero frames, for the stop log. See `AudioChunk::is_digital_silence`.
     zero_run: u64,
     longest_zero_run: u64,
     heard_nonzero: bool,
@@ -235,8 +230,7 @@ impl<S: Sink> Processor<S> {
                 "the next"
             }
         );
-        // Ignore overruns accumulated while the stream was idle; only
-        // active-recording loss is relevant.
+        // Overruns while idle don't count.
         self.shared
             .transport
             .overrun_frames
@@ -264,8 +258,7 @@ impl<S: Sink> Processor<S> {
             .fetch_add(1, Ordering::Release);
     }
 
-    /// Drain up to one bounded chunk from the ring. Returns the number of
-    /// samples consumed so callers can tell an empty ring from a busy one.
+    /// Drains up to one bounded chunk. Returns the samples consumed.
     fn drain(&mut self, consumer: &mut Consumer<f32>, disposition: ChunkDisposition) -> usize {
         self.drain_at_most(consumer, disposition, self.max_drain_samples)
     }
@@ -310,8 +303,7 @@ impl<S: Sink> Processor<S> {
         }
     }
 
-    /// Account for frames the callback could not fit into the ring during
-    /// the active recording. Warns once per recording.
+    /// Counts frames the ring dropped. Warns once per recording.
     fn observe_overrun(&mut self, frames: u64) {
         let Some(active) = self.active.as_mut() else {
             return;
@@ -328,8 +320,7 @@ impl<S: Sink> Processor<S> {
         }
     }
 
-    /// A resampling failure is a library bug: the pipeline can no longer be
-    /// trusted, so the recorder fails and the recording ends.
+    /// A resampling failure is a library bug; the recorder fails.
     fn fail_processing(&mut self, detail: String) {
         let error = self
             .shared
@@ -339,7 +330,6 @@ impl<S: Sink> Processor<S> {
         }
     }
 
-    /// Flush the resampler tail into the sink.
     fn finish_tail(&mut self) {
         let Some(active) = self.active.as_mut() else {
             return;
@@ -353,9 +343,7 @@ impl<S: Sink> Processor<S> {
         }
     }
 
-    /// Drains the audio in the ring now, not audio written while draining:
-    /// a failed stream that is not yet torn down can keep writing faster
-    /// than a slow sink consumes, and the drain must still end.
+    /// Drains only what's in the ring now: a failed stream may still be writing.
     fn drain_all(&mut self, consumer: &mut Consumer<f32>) {
         let mut remaining = consumer.slots();
         while remaining > 0 {
@@ -383,8 +371,6 @@ impl<S: Sink> Processor<S> {
 
     /// Ends the recording and hands it back. `None` if there is none.
     fn stop(&mut self, consumer: &mut Consumer<f32>) -> Option<Stopped<S>> {
-        // `stop` sends Stop only for a started recording. Without one, the
-        // dropped reply would be misreported as the delivery thread exiting.
         debug_assert!(self.active.is_some(), "Stop without a recording");
         self.active.as_ref()?;
         if self.capturing() {
@@ -395,9 +381,8 @@ impl<S: Sink> Processor<S> {
                 .swap(0, Ordering::AcqRel);
             self.observe_overrun(overrun);
 
-            // Request a pause that forwards one boundary block, then drain
-            // all audio committed before the acknowledgement. A failed
-            // recorder's stream is gone, so no acknowledgement will come.
+            // Pause after one boundary block and drain up to the acknowledgement.
+            // A failed stream never acknowledges.
             let transport = &self.shared.transport;
             let mut acknowledged = false;
             if self.shared.failure().is_none() {
@@ -434,14 +419,12 @@ impl<S: Sink> Processor<S> {
                 }
             }
 
-            // Everything still in the ring, including the boundary block,
-            // belongs to this recording.
+            // Everything left, boundary block included, is this recording's.
             self.drain_all(consumer);
             self.finish_tail();
 
             if acknowledged {
-                // Resume before stop() returns so an immediate recording
-                // cannot lose its first callback to this pause request.
+                // Resume now so the next recording doesn't lose its first block.
                 let transport = &self.shared.transport;
                 transport.pause_acknowledged.store(false, Ordering::Relaxed);
                 transport.pause_requested.store(false, Ordering::Release);
@@ -485,8 +468,7 @@ impl<S: Sink> Processor<S> {
                 longest_zero_run as f64 / rate
             );
         }
-        // REVIEW(xruns): reported in the log only; `is_complete` does not
-        // see them yet.
+        // Logged only; `is_complete` doesn't see xruns.
         let xruns = self.shared.xruns.swap(0, Ordering::Relaxed);
         if xruns > 0 {
             log::warn!(
@@ -505,8 +487,7 @@ impl<S: Sink> Processor<S> {
     }
 }
 
-/// Hands one chunk to the sink, unless the recording has ended. A panic is
-/// caught: the sink is not called again and the recording ends.
+/// Hands one chunk to the sink. A panic ends the recording.
 fn deliver<S: Sink>(active: &mut Active<S>, samples: &[f32], valid: usize, format: (u32, u16)) {
     if active.ended.is_some() {
         return;

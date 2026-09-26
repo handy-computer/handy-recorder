@@ -1,12 +1,5 @@
-//! The capture engine module hub. The engine itself handles the
-//! real-time OS callback and safely gets the data onto an ordinary
-//! thread so applications can do whatever processing they need.
-//!
-//! The engine will resample into the format specified and deliver
-//! fixed size AudioChunks
-//!
-//! It also watches for errors and issues on the capture side and
-//! reports them appropriately.
+//! The capture engine: moves audio from the real-time callback to an ordinary
+//! thread, resamples it into fixed-size chunks, and watches for failures.
 
 pub(crate) mod delivery;
 pub(crate) mod engine;
@@ -22,8 +15,7 @@ mod smoke {
 
     use crate::{CollectingSink, Recorder, RecorderConfig};
 
-    /// Real hardware: records one second of speech-format audio from the
-    /// default microphone. Run with `cargo test -- --ignored`.
+    /// Real hardware. Run with `cargo test -- --ignored`.
     #[test]
     #[ignore = "needs a microphone"]
     fn records_one_second_from_the_default_microphone() {
@@ -39,8 +31,7 @@ mod smoke {
         let samples = stopped.sink.into_samples();
         let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
         eprintln!("captured {} samples at 16 kHz, peak {peak}", samples.len());
-        // About one second; the start edge includes up to one poll interval
-        // of audio from before start, and a Bluetooth device may start late.
+        // About one second; a Bluetooth device may start late.
         assert!(samples.len() >= 12_000, "only {} samples", samples.len());
     }
 }

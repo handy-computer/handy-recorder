@@ -1,12 +1,9 @@
-//! Turns cpal's errors into `BackendError`s. The one place that reads
-//! platform output: where cpal's kind is missing or too coarse, it is
-//! corrected here from the message (WASAPI HRESULTs, CoreAudio and ALSA
-//! text). The engine maps kinds only and never reads messages.
+//! cpal errors to `BackendError`s. The only place that reads platform
+//! messages, to correct kinds cpal leaves missing or coarse.
 
 use crate::backend::{BackendError, BackendErrorKind};
 
-/// Maps an error from a step of opening the device. The step prefixes the
-/// message.
+/// Maps an error from a step of opening; the step prefixes the message.
 pub(super) fn map_error_during(step: &str, e: cpal::Error) -> BackendError {
     classify(map_kind(e.kind()), format!("{step}: {e}"))
 }
@@ -15,8 +12,7 @@ pub(super) fn map_error_during(step: &str, e: cpal::Error) -> BackendError {
 pub(super) fn map_error(e: cpal::Error) -> BackendError {
     let kind = map_kind(e.kind());
     if kind.stream_survives() {
-        // May be reported repeatedly on the audio thread (xruns under load),
-        // so it carries a fixed description instead of an allocated message.
+        // Can repeat on the audio thread, so don't allocate.
         let message = match kind {
             BackendErrorKind::Xrun => "A buffer overrun or underrun occurred",
             _ => "Real-time scheduling was refused for the audio thread",
@@ -39,11 +35,7 @@ fn classify(kind: BackendErrorKind, message: String) -> BackendError {
                 Some(ERROR_NOT_FOUND | AUDCLNT_E_SERVICE_NOT_RUNNING)
             )
         {
-            // cpal leaves these unclassified. Reported by a running stream, they
-            // mean the Windows Audio service went away (measured: restarting it
-            // fails the stream with ERROR_NOT_FOUND); the device may still be
-            // there. At open the kind makes no difference: the engine reports
-            // anything but denial, absence, and busy as `Backend`.
+            // On a running stream: the Windows Audio service restarted.
             BackendErrorKind::StreamInvalidated
         } else {
             kind
@@ -51,22 +43,17 @@ fn classify(kind: BackendErrorKind, message: String) -> BackendError {
     BackendError::new(kind, name_hresult(message))
 }
 
-/// Denial that cpal leaves unclassified, as WASAPI reports it at open
-/// (E_ACCESSDENIED). A running WASAPI stream is failed with the unplug code
-/// instead, which the engine tells apart through the privacy settings.
+/// Denial cpal leaves unclassified (WASAPI E_ACCESSDENIED at open).
 fn is_microphone_access_denied(message: &str) -> bool {
     let normalized = message.to_lowercase();
     normalized.contains("access is denied")
         || normalized.contains("permission denied")
         || normalized.contains("0x80070005")
-        // E_ACCESSDENIED as cpal's WASAPI host formats it (io::Error, decimal
-        // HRESULT). Unlike the text above, this does not depend on the
-        // Windows display language.
+        // E_ACCESSDENIED in decimal; independent of display language.
         || normalized.contains("os error -2147024891")
 }
 
-/// No device to open: none at all, or CoreAudio failing to read the format
-/// of a default that has gone.
+/// No device, or CoreAudio failing to read a vanished default's format.
 fn is_no_input_device_error(message: &str) -> bool {
     let normalized = message.to_lowercase();
     normalized.contains("no input device found")
@@ -81,19 +68,15 @@ const AUDCLNT_E_RESOURCES_INVALIDATED: u32 = 0x8889_0026;
 /// HRESULT_FROM_WIN32(ERROR_NOT_FOUND), "Element not found."
 const ERROR_NOT_FOUND: u32 = 0x8007_0490;
 
-/// The HRESULT in a WASAPI error message. cpal formats Windows errors as an
-/// `io::Error`: the system's (localized) text, then "(os error <decimal>)".
+/// The HRESULT from cpal's "... (os error <decimal>)" message.
 fn hresult(message: &str) -> Option<u32> {
     let (_, rest) = message.rsplit_once("(os error ")?;
     let code: i32 = rest.strip_suffix(')')?.parse().ok()?;
-    // HRESULTs are negative as i32 (the failure bit); plain errno values on
-    // other platforms are not.
+    // Negative as i32; errno values are not.
     (code < 0).then_some(code as u32)
 }
 
-/// Names the WASAPI codes the library has met, whose system text is missing
-/// ("FormatMessageW() returned error 317") or depends on the display
-/// language. Any other message is returned unchanged.
+/// Names known WASAPI codes, whose system text is missing or localized.
 fn name_hresult(message: String) -> String {
     let Some(code) = hresult(&message) else {
         return message;
@@ -236,9 +219,7 @@ mod tests {
                 BackendErrorKind::PermissionDenied,
                 "{message}"
             );
-            // A running stream is classified the same way. WASAPI does not
-            // report denial like this there (see `is_microphone_access_denied`),
-            // so in practice this changes nothing.
+            // A running stream is classified the same way.
             let running = map_error(cpal::Error::with_message(
                 cpal::ErrorKind::BackendError,
                 message,

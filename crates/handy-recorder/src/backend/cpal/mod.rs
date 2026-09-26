@@ -1,5 +1,4 @@
-//! The CPAL 0.18 backend. The device opens at its OS default format
-//! (`default_input_config`).
+//! The CPAL backend. Devices open at their OS default format.
 
 use std::{
     collections::HashMap,
@@ -21,15 +20,11 @@ use super::{
 use crate::{InputDevice, Permission};
 
 pub(crate) struct CpalBackend {
-    /// The host cpal picked, once for the process.
     id: cpal::HostId,
-    /// The host every operation uses; `None` when it is PulseAudio, where
-    /// each operation connects afresh (`host`).
+    /// `None` for PulseAudio, which connects per operation (`host`).
     shared: Option<cpal::Host>,
 }
 
-// One host for the process, where it holds no server connection (on Linux,
-// ALSA). Both are thread-safe on every target this compiles for.
 const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<cpal::Host>();
@@ -37,29 +32,23 @@ const _: () = {
 };
 
 impl CpalBackend {
-    /// The process-wide backend.
     pub fn shared() -> Arc<Self> {
         static SHARED: OnceLock<Arc<CpalBackend>> = OnceLock::new();
         Arc::clone(SHARED.get_or_init(|| Arc::new(Self::new())))
     }
 
-    /// cpal's default host. On Linux that is PulseAudio when a server is
-    /// running (the `pulseaudio` feature in Cargo.toml), otherwise ALSA.
+    /// cpal's default host: on Linux, PulseAudio if running, else ALSA.
     pub fn new() -> Self {
         let host = cpal::default_host();
         let id = host.id();
         Self {
             id,
-            // The connection that picked PulseAudio is dropped here.
             shared: (!is_pulseaudio(id)).then_some(host),
         }
     }
 
-    /// The host for one operation. PulseAudio gets a new server connection
-    /// for every stream and every listing: a sound server restart kills a
-    /// connection for good, so a long-lived one would fail every later open
-    /// (measured on PipeWire 1.4). A stream's device keeps its connection
-    /// alive; connecting takes a few milliseconds.
+    /// PulseAudio gets a fresh connection per operation: a server restart
+    /// kills old ones for good.
     fn host(&self) -> Result<HostRef<'_>, BackendError> {
         match &self.shared {
             Some(host) => Ok(HostRef::Shared(host)),
@@ -70,7 +59,6 @@ impl CpalBackend {
     }
 }
 
-/// The shared host, or one of the operation's own.
 enum HostRef<'a> {
     Shared(&'a cpal::Host),
     Own(cpal::Host),
@@ -103,8 +91,7 @@ fn device_name(device: &cpal::Device) -> String {
         .unwrap_or_else(|_| "Unknown".into())
 }
 
-/// Whether a backend's device IDs survive restarts and replugs. ALSA PCM
-/// names can move between cards, so they are best effort.
+/// ALSA PCM names can move between cards.
 fn id_is_stable(host: cpal::HostId) -> bool {
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
     if host == cpal::HostId::Alsa {
@@ -114,9 +101,7 @@ fn id_is_stable(host: cpal::HostId) -> bool {
     true
 }
 
-/// ALSA's `null` PCM, which it lists as an input: capturing from it
-/// delivers zeros as fast as they can be read (104 s of audio in a 3 s
-/// recording). Left out of the device list, so it cannot be opened either.
+/// ALSA's `null` PCM delivers zeros as fast as it's read; hidden.
 fn is_null_pcm(id: &cpal::DeviceId) -> bool {
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
     if id.host() == cpal::HostId::Alsa {
@@ -126,9 +111,7 @@ fn is_null_pcm(id: &cpal::DeviceId) -> bool {
     false
 }
 
-/// Whether a device records another device's output: a PulseAudio monitor
-/// source. The server names every monitor `<sink>.monitor` (the source
-/// info's "Monitor of Sink"), and cpal passes on only the name.
+/// PulseAudio names every monitor source `<sink>.monitor`.
 fn is_monitor(id: &cpal::DeviceId) -> bool {
     #[cfg(target_os = "linux")]
     if id.host() == cpal::HostId::PulseAudio {
@@ -138,10 +121,7 @@ fn is_monitor(id: &cpal::DeviceId) -> bool {
     false
 }
 
-/// Reads a device's channel count without opening it: the channel count of
-/// the format it would be opened at.
-/// `None` on ALSA, where reading a device's configs opens its PCM, which
-/// cpal avoids during enumeration because failed opens can leak descriptors.
+/// `None` on ALSA, where reading configs opens the PCM.
 fn channels_without_opening(host: cpal::HostId, device: &cpal::Device) -> Option<u16> {
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
     if host == cpal::HostId::Alsa {
@@ -151,10 +131,7 @@ fn channels_without_opening(host: cpal::HostId, device: &cpal::Device) -> Option
     device.default_input_config().ok().map(|c| c.channels())
 }
 
-/// Enumerates input devices with their identity. A device whose backend has
-/// no ID gets one built from its name and occurrence ("USB Mic#1").
-/// `with_channels` also reads each device's channel count, which costs a
-/// config query per device on CoreAudio and WASAPI.
+/// Devices without a backend ID get one from name and occurrence ("USB Mic#1").
 fn enumerate(
     host: &cpal::Host,
     with_channels: bool,
@@ -206,8 +183,6 @@ impl Backend for CpalBackend {
     }
 
     fn denial_is_silent(&self) -> bool {
-        // Linux reports no permission status, so the answer does not matter
-        // there.
         cfg!(target_os = "macos")
     }
 
@@ -220,7 +195,6 @@ impl Backend for CpalBackend {
     }
 
     fn open_device(&self, id: Option<&str>) -> Result<Box<dyn OpenDevice>, BackendError> {
-        // TODO(review): see TODO.md, "Device enumeration on every open".
         let resolve_started = Instant::now();
         let host = self.host()?;
         let host = &*host;
@@ -242,12 +216,8 @@ impl Backend for CpalBackend {
                     )
                 })?;
                 let id = default.id().ok();
-                // Open the device the default resolves to now, not the
-                // default itself: WASAPI fails a stream opened on the default
-                // (`StreamInvalidated`) when the user picks another default,
-                // while a stream on a specific device stays on it, as on
-                // CoreAudio. Falls back to the default where it cannot be
-                // resolved.
+                // Open the resolved device, not "default": WASAPI invalidates
+                // a default stream when the user switches.
                 enumerate(host, false)
                     .ok()
                     .and_then(|devices| {
@@ -274,8 +244,6 @@ impl Backend for CpalBackend {
         log::debug!("resolve_device={:?}", resolve_started.elapsed());
 
         let config_started = Instant::now();
-        // The format the OS has the device set to: the WASAPI mix format,
-        // the CoreAudio stream format, or cpal's pick on ALSA.
         let config = device
             .default_input_config()
             .map_err(|e| map_error_during("Failed to fetch preferred config", e))?;
@@ -302,7 +270,6 @@ impl Backend for CpalBackend {
             }
         };
 
-        // The opened device's channel count is the format it runs at.
         info.channels = Some(config.channels());
 
         Ok(Box::new(CpalOpenDevice {
@@ -321,8 +288,7 @@ impl Backend for CpalBackend {
 }
 
 struct CpalOpenDevice {
-    /// Which host opened the device: PulseAudio needs a fragment size and a
-    /// source watch.
+    /// PulseAudio needs a fragment size and a source watch.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     host: cpal::HostId,
     info: InputDevice,
@@ -334,13 +300,11 @@ struct CpalOpenDevice {
 
 struct CpalStream {
     _stream: cpal::Stream,
-    /// The input device's ID, for finding its headset's output device.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     device_id: Option<cpal::DeviceId>,
-    /// The silent output stream holding the headset (`take_headset`).
+    /// Silent output holding the headset (`take_headset`).
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     headset: Option<cpal::Stream>,
-    /// Watches that the PulseAudio source still exists.
     #[cfg(target_os = "linux")]
     watch: Option<pulse::SourceWatch>,
 }
@@ -369,7 +333,6 @@ impl InputStream for CpalStream {
             return;
         };
         let Some(output_uid) = super::headset_macos::bluetooth_output_uid(id.id()) else {
-            // Not a Bluetooth headset.
             return;
         };
         let started = Instant::now();
@@ -411,8 +374,7 @@ fn silent_output(id: &cpal::DeviceId) -> Result<cpal::Stream, String> {
             config.config(),
             format,
             |data: &mut cpal::Data, _: &cpal::OutputCallbackInfo| data.bytes_mut().fill(0),
-            // Runs on the audio thread; the headset is best effort, and the
-            // input stream reports anything that matters.
+            // Best effort; the input stream reports anything that matters.
             |_| {},
             None,
         )
@@ -498,8 +460,7 @@ where
     device.build_input_stream(
         config,
         move |samples: &[T], _: &cpal::InputCallbackInfo| data(T::wrap(samples)),
-        // May run on the platform audio thread. Converting allocates the
-        // message; this happens only when the stream reports an error.
+        // Allocates only for fatal errors; see `map_error`.
         move |e: cpal::Error| error(map_error(e)),
         None,
     )
@@ -509,8 +470,7 @@ where
 mod tests {
     use super::*;
 
-    /// Real hardware: lists input devices, then opens each by ID and reads
-    /// its format. Run with `cargo test -- --ignored --nocapture`.
+    /// Real hardware. Run with `cargo test -- --ignored --nocapture`.
     #[test]
     #[ignore = "needs audio devices"]
     fn lists_and_resolves_real_devices() {

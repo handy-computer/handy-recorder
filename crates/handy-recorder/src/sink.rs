@@ -2,20 +2,13 @@
 ///
 /// Called on the delivery thread, never on the real-time audio thread. Rules:
 ///
-/// - **Return promptly.** A slow sink causes dropped audio, which is counted
-///   in `Stopped::dropped_frames`.
-///   A sink that never returns fails the recorder with `SinkStalled`, and the
-///   sink is lost.
+/// - **Return promptly.** A slow sink drops audio (`Stopped::dropped_frames`);
+///   one that never returns fails the recorder with `SinkStalled`.
 /// - **The sink comes back.** `Recorder::stop` returns it, even after a panic.
-/// - **Errors are the application's.** `process_chunk` returns nothing; a
-///   sink records its own errors and the application decides what they mean.
-///   A panic is caught and ends the recording with
-///   `EndReason::SinkPanicked`; the recorder is unaffected. Requires
-///   `panic = "unwind"`.
+/// - **Errors are the application's.** A sink records its own errors. A panic
+///   ends the recording with `EndReason::SinkPanicked` (needs `panic = "unwind"`).
 ///
-/// The first `process_chunk` call of a recording means audio is flowing. An
-/// application that shows a "connecting" state (Bluetooth devices can take
-/// seconds) has its sink signal that moment.
+/// The first `process_chunk` call of a recording means audio is flowing.
 pub trait Sink: Send + 'static {
     fn process_chunk(&mut self, chunk: AudioChunk<'_>);
 }
@@ -40,15 +33,8 @@ pub struct AudioChunk<'a> {
 }
 
 impl AudioChunk<'_> {
-    /// True when every real sample in this chunk is exactly zero (the final
-    /// chunk's zero padding is ignored).
-    ///
-    /// A real microphone always has a noise floor, so a run of these usually
-    /// means a muted device, a Bluetooth headset connected to another device
-    /// (it can stay listed here and deliver zeros), or denied access. A
-    /// device's first few hundred milliseconds can be zeros too. The library
-    /// only logs digital silence; what counts as too long, and what to tell
-    /// the user, is the application's decision.
+    /// Every real sample is exactly zero. A run of these usually means a muted
+    /// or denied mic, or a headset connected to another device.
     pub fn is_digital_silence(&self) -> bool {
         let real = self.valid_frames * self.channels as usize;
         self.samples[..real].iter().all(|&s| s == 0.0)

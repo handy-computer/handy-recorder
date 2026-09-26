@@ -13,8 +13,7 @@ use crate::{AudioChunk, Error, Recorder, RecorderConfig, Sink, Stopped};
 
 pub const WAIT: Duration = Duration::from_secs(5);
 
-/// Short bounds for tests. Watchdog bounds are long unless a test is about
-/// them, so a slow CI machine cannot trip them by accident.
+/// Short bounds, except watchdog bounds, which slow CI could trip.
 pub fn timeouts() -> Timeouts {
     Timeouts {
         open: Duration::from_secs(2),

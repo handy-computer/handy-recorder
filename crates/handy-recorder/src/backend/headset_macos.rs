@@ -1,9 +1,6 @@
 //! Finds a Bluetooth headset's output device on macOS, for `take_headset`.
-//!
-//! A headset appears as two CoreAudio devices, one for its microphone and
-//! one for its output. Running
-//! output on a headset that another device (a phone) is using moves it to
-//! this Mac; its microphone alone does not (confirmed on AirPods Pro 3).
+//! Playing output moves a headset to this Mac; recording from its mic alone
+//! does not.
 
 use std::{
     ffi::c_void,
@@ -62,8 +59,7 @@ pub(crate) fn bluetooth_output_uid(input_uid: &str) -> Option<String> {
     {
         return Some(output);
     }
-    // Observed on AirPods: both halves' UIDs are the Bluetooth address plus
-    // a suffix ("34-0E-22-09-9C-73:input", "...:output").
+    // Fallback: both UIDs are the Bluetooth address plus ":input"/":output".
     let output = input_uid.rsplit_once(':').and_then(|(address, _)| {
         devices
             .iter()

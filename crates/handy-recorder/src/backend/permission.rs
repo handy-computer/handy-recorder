@@ -1,5 +1,4 @@
-//! Microphone permission as the platform records it: macOS's TCC
-//! authorization, the Windows privacy settings in the registry.
+//! Microphone permission: macOS TCC, or Windows' privacy registry settings.
 
 use crate::Permission;
 
@@ -13,20 +12,15 @@ pub(crate) fn permission_status() -> Permission {
     let status = unsafe { AVCaptureDevice::authorizationStatusForMediaType(audio) };
     match status {
         AVAuthorizationStatus::Authorized => Permission::Granted,
-        // Restricted: blocked by policy (parental controls, MDM); the user
-        // cannot grant it either.
+        // Restricted: blocked by policy; the user can't grant it either.
         AVAuthorizationStatus::Denied | AVAuthorizationStatus::Restricted => Permission::Denied,
         AVAuthorizationStatus::NotDetermined => Permission::NotDetermined,
         _ => Permission::Unknown,
     }
 }
 
-/// Settings > Privacy & security > Microphone. Windows never prompts a
-/// desktop app; access is on or off. Each switch is a registry value,
-/// "Allow" or "Deny", and turning off any of the three makes WASAPI refuse
-/// a desktop app's stream (measured on Windows 11). Only switches known to
-/// do that are read: `Denied` turns a lost device into `PermissionDenied`
-/// (see `runtime_error`), and applications act on it.
+/// Windows' three microphone privacy switches; any "Deny" makes WASAPI refuse
+/// the stream. Windows never prompts a desktop app.
 #[cfg(target_os = "windows")]
 pub(crate) fn permission_status() -> Permission {
     use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
@@ -35,8 +29,7 @@ pub(crate) fn permission_status() -> Permission {
     let switches = [
         // "Microphone access", for every user of the device.
         windows_consent(HKEY_LOCAL_MACHINE, STORE),
-        // "Let apps access your microphone", for this user. Despite the
-        // name, it covers desktop apps too.
+        // "Let apps access your microphone", for this user (desktop apps too).
         windows_consent(HKEY_CURRENT_USER, STORE),
         // "Let desktop apps access your microphone", for this user.
         windows_consent(HKEY_CURRENT_USER, &format!(r"{STORE}\NonPackaged")),
@@ -59,7 +52,7 @@ fn windows_consent(root: windows::Win32::System::Registry::HKEY, subkey: &str) -
     };
 
     let subkey = HSTRING::from(subkey);
-    // "Allow", "Deny", or "Prompt"; anything longer is not a value we know.
+    // "Allow", "Deny", or "Prompt".
     let mut buffer = [0u16; 16];
     let mut bytes = size_of_val(&buffer) as u32;
     let status = unsafe {

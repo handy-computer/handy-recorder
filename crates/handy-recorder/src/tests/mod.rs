@@ -1,4 +1,4 @@
-//! Tier-1 tests: the recorder end to end over the fake backend.
+//! The recorder end to end over the fake backend.
 
 mod failures;
 mod formats;

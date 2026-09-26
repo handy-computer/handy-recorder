@@ -1,14 +1,13 @@
 //! Cross-platform microphone capture.
 //!
-//! Handy Recorder owns the real-time audio path.
-//! It gives applications audio in the
-//! format they asked for, on an ordinary thread, reporting when audio was lost
-//! or the stream broke.
+//! Handy Recorder owns the real-time audio path. It gives applications audio
+//! in the format they asked for, on an ordinary thread, reporting when audio
+//! was lost or the stream broke.
 //!
 //! # Concepts
 //!
-//! - A [`Recorder`] when opened warms the selected microphone. When start
-//!   is called, the application will begin receiving AudioChunks from the Sink.
+//! - A [`Recorder`] warms the selected microphone when opened. After `start`,
+//!   the sink receives the audio.
 //! - A [`Sink`] is application code that receives the recording's audio as
 //!   fixed-size [`AudioChunk`]s. It is lent to the library by `start` and
 //!   handed back by `stop`.
@@ -59,17 +58,11 @@ use std::fmt;
 use backend::cpal::CpalBackend;
 use capture::engine::{Engine, Timeouts};
 
-// ---------------------------------------------------------------------------
-// Recorder
-// ---------------------------------------------------------------------------
-
 /// An open microphone, recording into sinks of type `S`. Owned, `Send`,
 /// `Sync`, lifetime-free: store it in a struct, or share it with an `Arc`.
 ///
-/// Every recording on a recorder uses the same sink type. An application
-/// that needs several kinds uses an enum, which `stop` hands back to match
-/// on, or `Box<dyn Sink>` when its sinks forward audio elsewhere and nothing
-/// needs to be read back out of them.
+/// Every recording uses the same sink type; use an enum or `Box<dyn Sink>`
+/// for several kinds.
 ///
 /// Dropping it is `close`.
 pub struct Recorder<S> {
@@ -77,27 +70,18 @@ pub struct Recorder<S> {
 }
 
 impl<S: Sink> Recorder<S> {
-    /// Opens the device at the format the OS has it set to and builds the
-    /// whole output pipeline (ring, channel routing, resampler, framer).
+    /// Opens the device at its OS format. Audio may take seconds to flow
+    /// (Bluetooth); the sink's first chunk signals it, and `NoAudio` if never.
     ///
-    /// Returns once the OS stream is started. Audio
-    /// may not be flowing yet: Bluetooth devices can take seconds to deliver
-    /// their first samples. A sink's first `process_chunk` call is the signal
-    /// that audio is flowing. If the device never delivers audio, the
-    /// recorder fails with `ErrorKind::NoAudio`.
-    ///
-    /// Without a failure handler, a failure surfaces only at the next `start`
-    /// or `stop`. Use the following
-    /// [`open_with_failure_handler`](Self::open_with_failure_handler)
-    /// to capture failures
+    /// Failures surface only at the next `start` or `stop`; prefer
+    /// [`open_with_failure_handler`](Self::open_with_failure_handler).
     pub fn open(config: RecorderConfig) -> Result<Self, Error> {
         Ok(Self {
             engine: Engine::open(CpalBackend::shared(), config, None, Timeouts::default())?,
         })
     }
 
-    /// `open`, plus a function called the moment this recorder fails. The
-    /// recommended way to open a recorder.
+    /// `open`, plus a handler called the moment this recorder fails.
     pub fn open_with_failure_handler(
         config: RecorderConfig,
         handler: impl FnOnce(Error) + Send + 'static,
@@ -118,29 +102,18 @@ impl<S: Sink> Recorder<S> {
         self.engine.info()
     }
 
-    /// Starts a recording into `sink`
-    ///
-    /// Cheap and prompt: it never waits for audio or touches the device.
-    /// Fails only with `AlreadyRecording` or the error the recorder failed
-    /// with; the sink always comes back in the error.
+    /// Starts a recording into `sink`. Never waits for audio or touches the
+    /// device. On error the sink comes back.
     pub fn start(&self, sink: S) -> Result<(), StartError<S>> {
         self.engine.start(sink)
     }
 
-    /// Ends the recording and hands back the sink.
+    /// Ends the recording and returns the sink, even after a failure or sink
+    /// panic; `end_reason` says what ended it. A recording that ended on its
+    /// own still needs this `stop` before the next `start`.
     ///
-    /// A recording that ended on its own (the recorder failed, the sink
-    /// panicked) still waits here for its `stop`, and a new `start` fails
-    /// with `AlreadyRecording` until then.
-    ///
-    /// Returns `Ok` whenever the sink can be given back, including after the
-    /// recorder failed or the sink panicked; `end_reason` says what ended it.
-    /// Returns `Err` with `NotRecording` if there is no recording, or
-    /// `SinkStalled` if the sink never returned and is lost; after
-    /// `SinkStalled` the slot is released and the recorder has failed.
-    /// Called from inside the sink, it returns `StopFromSink` at once and the
-    /// recording continues. To cancel a recording, stop it and drop the
-    /// result.
+    /// Errors: `NotRecording`, `SinkStalled` (the sink is lost), or
+    /// `StopFromSink` (called from inside the sink; the recording continues).
     pub fn stop(&self) -> Result<Stopped<S>, Error> {
         self.engine.stop()
     }
@@ -148,7 +121,6 @@ impl<S: Sink> Recorder<S> {
     /// Closes the microphone. An active recording is discarded; call `stop`
     /// first to keep it.
     pub fn close(self) -> Result<(), Error> {
-        // `drop` then finds the recorder already closed.
         self.engine.shutdown()
     }
 }
@@ -195,24 +167,19 @@ impl<S> std::error::Error for StartError<S> {}
 #[derive(Debug)]
 pub struct Stopped<S> {
     pub sink: S,
-    /// What ended the recording: the application's `stop`, or a failure
-    /// before it.
     pub end_reason: EndReason,
-    /// Frames the device produced during the recording that were lost
-    /// because the ring was full, usually because the sink was slow.
+    /// Frames lost because the ring was full, usually a slow sink.
     pub dropped_frames: u64,
 }
 
 impl<S> Stopped<S> {
-    /// `StopCalled` and no dropped frames. The library never presents an
-    /// incomplete recording as complete.
+    /// `StopCalled` and no dropped frames.
     pub fn is_complete(&self) -> bool {
         matches!(self.end_reason, EndReason::StopCalled) && self.dropped_frames == 0
     }
 }
 
-// Public handles are `Send`, and the recorder is also `Sync`, so they can be
-// stored anywhere, shared between threads, and held by the Node binding.
+// Public handles are `Send`, and the recorder is also `Sync`.
 const _: () = {
     const fn assert_send<T: Send>() {}
     const fn assert_sync<T: Sync>() {}

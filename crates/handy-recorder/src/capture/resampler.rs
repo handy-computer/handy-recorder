@@ -1,7 +1,6 @@
 use rubato::{FftFixedIn, ResampleError, Resampler, ResamplerConstructionError};
 use std::fmt;
 
-/// Fixed resampler FFT chunk size
 const RESAMPLER_CHUNK_SIZE: usize = 1024;
 
 /// Cap on zero-chunk rounds when draining the tail at `finish()`.
@@ -35,11 +34,8 @@ impl From<ResampleError> for ResamplerError {
     }
 }
 
-/// Resamples interleaved K-channel audio and cuts it into fixed-size chunks.
-///
-/// Chunks are emitted as `(interleaved samples, valid frames)`: every chunk
-/// has `frames_per_chunk` frames, and only the final one, from `finish()`, is
-/// zero-padded, with `valid frames` saying how many of its frames are real.
+/// Resamples interleaved K-channel audio into fixed-size chunks, emitted as
+/// `(samples, valid frames)`. Only the final chunk is zero-padded.
 pub struct FrameResampler {
     resampler: Option<FftFixedIn<f32>>,
     channels: usize,
@@ -53,8 +49,7 @@ pub struct FrameResampler {
     pending: Vec<f32>,
     in_hz: usize,
     out_hz: usize,
-    /// Frames in/out of the inner resampler; `finish()` uses the pair to
-    /// know how much real audio (~10-30ms) its delay line still holds.
+    /// Frames in/out, so `finish()` knows how much its delay line holds.
     in_count: usize,
     out_count: usize,
 }
@@ -94,14 +89,12 @@ impl FrameResampler {
         })
     }
 
-    /// Output delay of the inner resampler, in output frames (0 when not
-    /// resampling).
+    /// Output delay in output frames (0 when not resampling).
     pub fn output_delay(&self) -> usize {
         self.resampler.as_ref().map_or(0, |r| r.output_delay())
     }
 
-    /// Feeds interleaved frames. `src.len()` must be a multiple of the
-    /// channel count.
+    /// Feeds interleaved whole frames.
     pub fn push(
         &mut self,
         mut src: &[f32],
@@ -140,13 +133,10 @@ impl FrameResampler {
         Ok(())
     }
 
-    /// Flushes the resampler tail and the final, zero-padded chunk. The
-    /// final chunk is emitted even when the tail drain fails, since its
-    /// frames are real audio.
+    /// Flushes the tail and the final padded chunk, even if the tail fails.
     pub fn finish(&mut self, mut emit: impl FnMut(&[f32], usize)) -> Result<(), ResamplerError> {
         let result = self.drain_tail(&mut emit);
 
-        // Emit any remaining pending frames (padded with zeros)
         if !self.pending.is_empty() {
             let valid_frames = self.pending.len() / self.channels;
             self.pending
@@ -161,23 +151,18 @@ impl FrameResampler {
         if self.resampler.is_none() || self.in_count == 0 {
             return Ok(());
         }
-        // Output lags input by output_delay() samples, so all real audio
-        // has emerged only once in*ratio + delay samples are out.
+        // All real audio is out once in*ratio + delay frames are.
         let delay = self.output_delay();
         let expected = self.in_count * self.out_hz / self.in_hz + delay;
 
-        // Process any remaining input samples (padded internally). The
-        // padding's output is synthetic, so keep only what the count above
-        // allows; finish() zero-pads the final chunk instead.
+        // Keep only real output; the internal padding is synthetic.
         if !self.in_buf[0].is_empty() {
             let result = self
                 .resampler
                 .as_mut()
                 .unwrap()
                 .process_partial(Some(&self.in_buf), None);
-            // Drop the consumed input: a full in_buf would satisfy the
-            // next push()'s chunk check immediately, re-processing this
-            // padded tail into the following recording.
+            // Else the next recording re-processes this padded tail.
             self.clear_input();
             let out = result?;
             let take = expected.saturating_sub(self.out_count).min(out[0].len());
@@ -185,8 +170,7 @@ impl FrameResampler {
             self.emit_planar(&out, take, emit);
         }
 
-        // Feed zero chunks until all real audio is out, trimming the
-        // synthetic remainder.
+        // Feed zeros until all real audio is out.
         let mut rounds = 0;
         while self.out_count < expected && rounds < MAX_TAIL_ROUNDS {
             rounds += 1;
@@ -208,10 +192,7 @@ impl FrameResampler {
         Ok(())
     }
 
-    /// Clear all internal buffers so the next `push()` starts from a clean state.
-    ///
-    /// Call this between recordings to prevent stale audio from the previous
-    /// session leaking into the start of the next one via the FFT overlap buffers.
+    /// Clears all state between recordings, so no audio leaks into the next.
     pub fn reset(&mut self) {
         self.clear_input();
         self.pending.clear();
@@ -278,22 +259,17 @@ mod tests {
     fn reset_between_recordings_no_crosstalk() {
         let mut r = FrameResampler::new(48000, 16000, 480, 1).unwrap();
 
-        // Recording 1: ascending ramp (distinctive pattern)
-        let ramp: Vec<f32> = (0..48000).map(|i| i as f32 / 48000.0).collect(); // 1 second
+        let ramp: Vec<f32> = (0..48000).map(|i| i as f32 / 48000.0).collect();
         let out1 = collect_output(&mut r, &ramp);
         r.finish(|_, _| {}).unwrap();
         assert!(!out1.is_empty(), "Recording 1 should produce output");
 
-        // Reset between recordings
         r.reset();
 
-        // Recording 2: constant DC signal of -0.5
-        let dc = vec![-0.5f32; 48000]; // 1 second
+        let dc = vec![-0.5f32; 48000];
         let out2 = collect_output(&mut r, &dc);
 
-        // After the resampler settles (skip first frame which may have transient),
-        // all samples should be near -0.5, not contaminated by the ascending ramp.
-        // Skip first frame (480 samples at 16kHz/30ms), check the rest
+        // Skip the first chunk's transient; the rest must be free of the ramp.
         let tail = &out2[480..];
         for (i, &s) in tail.iter().enumerate() {
             assert!(
@@ -341,17 +317,13 @@ mod tests {
 
     #[test]
     fn finish_does_not_leak_tail_into_next_session() {
-        // 48kHz -> 16kHz, 30ms frames (480 output samples per frame).
         let mut rs = FrameResampler::new(48000, 16000, 480, 1).unwrap();
 
         // Leave a partial chunk buffered, then end the session.
         rs.push(&[0.5f32; 100], |_, _| {}).unwrap();
         rs.finish(|_, _| {}).unwrap();
 
-        // One fresh chunk yields ~341 output samples — below one frame, so
-        // nothing should be emitted yet. If finish() left its padded tail in
-        // in_buf, that tail is re-processed first, the output crosses the
-        // 480-sample frame boundary, and a stale frame is emitted here.
+        // ~341 samples out, under one chunk: anything emitted is the stale tail.
         let mut emitted = 0usize;
         rs.push(&[0.25f32; RESAMPLER_CHUNK_SIZE], |frame, _| {
             emitted += frame.len()
@@ -441,9 +413,7 @@ mod tests {
 
     #[test]
     fn output_counts_follow_the_frame_count_formula() {
-        // floor(input * out / in) real frames plus the
-        // resampler's output delay (trimming it is deferred), padding
-        // excluded. Passthrough emits exactly the input.
+        // floor(input * out / in) plus the output delay; passthrough is exact.
         for in_hz in [8_000, 16_000, 22_050, 32_000, 44_100, 48_000, 96_000] {
             for frames in [1, 10, 1023, 1024, 4097, in_hz / 3] {
                 let input = signal(in_hz, 0, frames);

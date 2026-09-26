@@ -3,10 +3,7 @@ use std::time::Duration;
 
 use crate::InputDevice;
 
-/// Follows `std::io::Error`: match on [`Error::kind`] to decide what to do,
-/// and log the whole value (`Display`) to explain it, e.g.
-/// "AirPods Pro (CoreAudio) disconnected 12.4 s into the stream:
-/// kAudioHardwareBadDeviceError".
+/// Match on [`Error::kind`] to decide what to do; log `Display` to explain it.
 #[derive(Debug, Clone)]
 pub struct Error(Box<Inner>);
 
@@ -19,7 +16,6 @@ struct Inner {
 }
 
 impl Error {
-    /// What happened. The part applications match on.
     pub fn kind(&self) -> ErrorKind {
         self.0.kind
     }
@@ -29,10 +25,7 @@ impl Error {
         self.0.device.as_ref()
     }
 
-    /// How long the stream had been running when this happened. `None` for
-    /// failures before the stream started (during `open`) and for errors
-    /// that are not about the stream (`AlreadyRecording`, `NotRecording`,
-    /// `StopFromSink`).
+    /// How long the stream had been running. `None` before it started.
     pub fn elapsed(&self) -> Option<Duration> {
         self.0.elapsed
     }
@@ -70,8 +63,6 @@ impl Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Name the device first when the error is about it. Sink, library,
-        // and misuse errors are not, so they read without it.
         let device = self
             .0
             .device
@@ -106,11 +97,9 @@ impl std::error::Error for Error {}
 /// | `CloseTimedOut` | Nothing to recover; log it. The platform may hold the device until the process exits. |
 /// | Anything else (the enum is non-exhaustive) | Treat as a failed recorder. |
 ///
-/// A recorder that fails while open reports it three times: to the failure
-/// handler, from every later `start`, and in `stop`'s
-/// [`EndReason::RecorderFailed`](crate::EndReason), which still carries the
-/// audio captured before the failure. [`Error::detail`] is the platform's
-/// message, for logs; do not match on it.
+/// A failure is reported to the failure handler, every later `start`, and
+/// `stop`'s [`EndReason::RecorderFailed`](crate::EndReason). Don't match on
+/// [`Error::detail`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ErrorKind {
@@ -133,17 +122,14 @@ pub enum ErrorKind {
     /// The device opened but never delivered audio.
     NoAudio,
     /// The device disappeared: unplugged, disabled, or Bluetooth dropped.
-    /// Also a Windows Audio service restart.
     DeviceLost,
-    /// The stream can no longer run as built though the device may still
-    /// exist: its configuration or the default device changed, or the sound
-    /// server restarted.
+    /// The stream can't run as built: its config or the default device
+    /// changed, or the sound server restarted.
     StreamInvalidated,
     /// The device stopped delivering audio without an error, or the system
     /// slept during the recording.
     Stalled,
-    /// The sink stopped returning. A bug in the application's sink; the sink
-    /// is lost.
+    /// The sink stopped returning and is lost.
     SinkStalled,
     /// Any other platform error; `detail` has the platform's message.
     Backend,
@@ -151,13 +137,11 @@ pub enum ErrorKind {
     Processing,
 
     // Misuse and lifecycle.
-    /// `start` before the previous recording was stopped, including one that
-    /// ended on its own and is waiting for its `stop`.
+    /// `start` before the previous recording was stopped.
     AlreadyRecording,
     /// `stop` with no recording to stop.
     NotRecording,
-    /// `stop` called from inside the sink. The recording continues; the sink
-    /// should signal the application, which calls `stop` from another thread.
+    /// `stop` called from inside the sink; call it from another thread.
     StopFromSink,
     /// The platform did not finish tearing the stream down in time.
     CloseTimedOut,
@@ -175,8 +159,7 @@ impl ErrorKind {
         )
     }
 
-    /// The phrase `Display` uses, written to follow the device's name when
-    /// there is one ("AirPods Pro (CoreAudio) disconnected").
+    /// The phrase `Display` uses, after the device's name if there is one.
     fn describe(self, after_device: bool) -> &'static str {
         match (self, after_device) {
             (Self::DeviceUnavailable, true) => "is not available",

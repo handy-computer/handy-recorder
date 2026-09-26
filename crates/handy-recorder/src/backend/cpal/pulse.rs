@@ -1,7 +1,4 @@
-//! What the CPAL PulseAudio host leaves out: a fragment size (the server's
-//! default delivers audio in fragments of seconds) and noticing that the
-//! opened source was removed (the server moves the stream to another
-//! source, and CPAL ignores the notice).
+//! Fills CPAL's PulseAudio gaps: a fragment size, and noticing a removed source.
 
 use std::{
     ffi::CString,
@@ -21,53 +18,30 @@ use pulseaudio::{ClientError, protocol::PulseError};
 
 use crate::backend::{BackendError, BackendErrorKind};
 
-/// How often the watch looks the source up. With `Timeouts::watchdog_tick`,
-/// bounds how long a stream moved to another source records from it before
-/// the recorder fails.
+/// How often the watch looks the source up.
 const LOOKUP_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Frames per fragment to request: the power of two at or above 20 ms.
-///
-/// Without a request, the server delivers audio in fragments of seconds,
-/// and CPAL's `play` waits for the first one: every open took 2 s on
-/// PipeWire 1.4, and up to 3.8 s on PulseAudio 15.99, where a recording
-/// also lost its last fragment's audio at `stop`. PipeWire runs its whole
-/// graph at the smallest quantum any stream asks for, and its default is
-/// 1024 frames at 48 kHz: asking for 960 frames there dropped the graph to
-/// 512, and 480 to 256 (`pw-top`), which costs every application power for
-/// as long as the recorder stays open. 1024 left it at 1024. The library
-/// frames chunks itself, so the fragment size only sets how often audio
-/// arrives.
-///
-/// Needs the patched CPAL (`Cargo.toml`): CPAL 0.18.2 caps a
-/// fixed-size stream's buffer at one fragment, and PulseAudio then
-/// delivers one callback and nothing more.
+/// Power of two at or above 20 ms. The default is seconds-long fragments;
+/// smaller ones drop PipeWire's whole-graph quantum and cost power.
+/// Needs the patched CPAL: 0.18.2 stalls after one fixed-size fragment.
 pub(super) fn fragment_frames(sample_rate: u32) -> u32 {
     (sample_rate / 50).max(1).next_power_of_two()
 }
 
-/// Checks that one source still exists, from a thread of its own with a
-/// connection of its own, so a hung server never blocks the device thread:
-/// that thread also runs the watchdog, which reports a hung server as a
-/// stall.
+/// Watches a source on its own thread and connection, so a hung server can't
+/// block the device thread.
 pub(super) struct SourceWatch {
-    /// The source was looked up and is gone. Until a lookup says so, the
-    /// source counts as present.
+    /// A lookup found the source gone.
     removed: Arc<AtomicBool>,
     name: String,
-    /// The connection's socket. Shutting it down fails a lookup in flight
-    /// and ends the connection's reactor thread, which otherwise notices a
-    /// dropped client only when it next wakes: an idle one never does, and
-    /// every recorder left a thread and three descriptors behind (measured
-    /// on PipeWire 1.4).
+    /// Shut down on drop to end the reactor thread, which otherwise leaks.
     socket: UnixStream,
     /// Dropped to stop the watch thread.
     _stop: mpsc::Sender<()>,
 }
 
 impl SourceWatch {
-    /// Starts watching. `None`, logged, if it cannot: the recorder then
-    /// works as before, without the check.
+    /// `None`, logged, if it can't; the recorder works without the check.
     pub(super) fn start(source: &str) -> Option<Self> {
         let Ok(name) = CString::new(source) else {
             log::warn!("cannot watch PulseAudio source {source:?}: the name contains NUL");
@@ -116,21 +90,16 @@ impl SourceWatch {
 }
 
 impl Drop for SourceWatch {
-    /// Ends the watch thread wherever it is: waiting for the next lookup
-    /// (`_stop`), or blocked on the server (the socket). Not joined: it
-    /// exits on its own, and nothing here may block the device thread.
+    /// Ends the watch thread wherever it is. Not joined, so it never blocks.
     fn drop(&mut self) {
         let _ = self.socket.shutdown(Shutdown::Both);
     }
 }
 
-/// The watch thread: connects, then looks the source up every
-/// `LOOKUP_INTERVAL` until stopped or the source is gone.
 fn watch(socket: UnixStream, name: CString, removed: &AtomicBool, stopped: &mpsc::Receiver<()>) {
     let source = name.to_string_lossy().into_owned();
     let started = Instant::now();
-    // No timeout: a hung handshake blocks only this thread, and `Drop`
-    // ends it.
+    // No timeout: a hung handshake blocks only this thread.
     let cookie = pulseaudio::cookie_path_from_env().and_then(|path| std::fs::read(path).ok());
     let client = match pulseaudio::Client::new_unix(c"handy-recorder-watch", socket, cookie) {
         Ok(client) => client,
@@ -159,8 +128,7 @@ fn watch(socket: UnixStream, name: CString, removed: &AtomicBool, stopped: &mpsc
                 removed.store(true, Ordering::Relaxed);
                 return;
             }
-            // Not evidence the source is gone. The server going away fails
-            // the stream itself; a watch stopped by `Drop` ends here too.
+            // Not evidence the source is gone.
             Err(e) => {
                 if !unsure_logged {
                     unsure_logged = true;
@@ -174,11 +142,7 @@ fn watch(socket: UnixStream, name: CString, removed: &AtomicBool, stopped: &mpsc
     }
 }
 
-/// Whether a lookup found the source the first lookup found. A source
-/// removed and added again, a replug between two lookups, comes back under
-/// a new index: PulseAudio and pipewire-pulse (which uses PipeWire's
-/// `object.serial`) never reuse one (measured on PipeWire 1.4). The stream
-/// stays on whichever source the server moved it to.
+/// A replugged source returns under a new index; indexes are never reused.
 fn same_source(first: &mut Option<u32>, index: u32) -> bool {
     *first.get_or_insert(index) == index
 }

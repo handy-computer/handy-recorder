@@ -7,33 +7,23 @@ use rtrb::{Consumer, Producer};
 
 use crate::backend::InputSample;
 
-/// Atomics shared by the callback, the delivery thread, and the device
-/// thread's watchdog; audio uses a wait-free SPSC ring.
-/// The callback must remain allocation-, lock-, logging-, and blocking-free.
+/// Atomics shared by the callback, the delivery thread, and the watchdog.
 #[derive(Default)]
 pub(crate) struct CaptureTransportState {
     pub pause_requested: AtomicBool,
-    /// Set after forwarding a pause's boundary block; subsequent callbacks
-    /// remain silent until the consumer clears the request.
+    /// Set after the pause's boundary block; later callbacks are dropped.
     pub pause_acknowledged: AtomicBool,
     /// Frames the callback could not fit into the ring.
     pub overrun_frames: AtomicU64,
-    /// Callbacks received with at least one frame, including silent ones
-    /// during a pause. The watchdog's measure of progress; it never looks
-    /// at amplitude.
+    /// Non-empty callbacks, including paused ones: the watchdog's progress.
     pub callbacks: AtomicU64,
-    /// Test-only: Start commands the consumer has applied. Lets a test write
-    /// a recording's first block only once it cannot be discarded as idle
-    /// audio (the consumer may drain between its command check and a Start
-    /// sent just after it).
+    /// Test-only: Start commands applied, so a test's first block isn't discarded.
     #[cfg(test)]
     pub starts_applied: std::sync::atomic::AtomicUsize,
-    /// Test-only: frames drained outside a stop (a stop always empties the
-    /// ring), so a test can wait until idle audio has been discarded.
+    /// Test-only: frames drained outside a stop.
     #[cfg(test)]
     pub frames_drained: std::sync::atomic::AtomicUsize,
-    /// Test-only: makes the delivery thread panic outside the sink, as a
-    /// library bug would.
+    /// Test-only: panics the delivery thread.
     #[cfg(test)]
     pub panic_delivery: AtomicBool,
 }
@@ -59,11 +49,8 @@ impl Routing {
     }
 }
 
-/// Real-time callback body. Keep this allocation-free, wait-free, and free
-/// of locks, logging, clocks, and system calls.
-///
-/// Writes whole frames of `routing.output_channels(channels)` samples, so on
-/// overrun it drops whole frames and never splits one across the ring.
+/// Real-time callback body; see `DataCallback` for the rules. On overrun it
+/// drops whole frames, never splitting one.
 pub(crate) fn write_input_to_ring<T>(
     data: &[T],
     channels: usize,
@@ -73,16 +60,13 @@ pub(crate) fn write_input_to_ring<T>(
 ) where
     T: InputSample,
 {
-    // Only blocks carrying at least one frame count as progress, so a
-    // backend that keeps calling back with empty blocks still trips the
-    // watchdog.
+    // Empty blocks aren't progress.
     let frame_count = data.len() / channels;
     if frame_count > 0 {
         transport.callbacks.fetch_add(1, Ordering::Relaxed);
     }
 
-    // Forward the first block that observes a pause; once acknowledged,
-    // remain silent until the consumer resumes capture.
+    // Forward the first block that sees a pause, then drop until resumed.
     if transport.pause_requested.load(Ordering::Acquire)
         && transport.pause_acknowledged.load(Ordering::Acquire)
     {
@@ -135,8 +119,7 @@ pub(crate) fn write_input_to_ring<T>(
             .fetch_add(dropped as u64, Ordering::Relaxed);
     }
 
-    // Publish the boundary write before acknowledging, including when the
-    // pause request arrives during the write.
+    // Acknowledge only after the boundary write is published.
     acknowledge_pause_after_write(transport);
 }
 
