@@ -86,6 +86,11 @@ const PROBES: &[(&str, &str, bool)] = &[
         true,
     ),
     (
+        "virtual-disconnect",
+        "Linux: remove a virtual PulseAudio source while recording and while idle",
+        false,
+    ),
+    (
         "bluetooth-handoff",
         "move a Bluetooth headset to another device (phone) mid-recording, then back",
         true,
@@ -98,6 +103,16 @@ const PROBES: &[(&str, &str, bool)] = &[
     (
         "default-change",
         "change the system default input during a recording",
+        true,
+    ),
+    (
+        "format-change",
+        "macOS/Windows: change the device's sample rate during a recording",
+        true,
+    ),
+    (
+        "soak",
+        "one recorder open for --secs (default 1800), a 5 s recording every 30 s (long; no action)",
         true,
     ),
     (
@@ -278,7 +293,10 @@ fn run(name: &str, opts: &Opts) -> Outcome {
         "slow-start" => probe_slow_start(opts),
         "disconnect-recording" => probe_disconnect_recording(opts),
         "disconnect-idle" => probe_disconnect_idle(opts),
+        "virtual-disconnect" => probe_virtual_disconnect(),
         "default-change" => probe_default_change(opts),
+        "format-change" => probe_format_change(opts),
+        "soak" => probe_soak(opts),
         "replug" => probe_replug(opts),
         "bluetooth-handoff" => probe_bluetooth_handoff(opts),
         "sleep-wake" => probe_sleep_wake(opts),
@@ -558,6 +576,12 @@ fn how(action: &str) -> &'static str {
         ("permission", _) => {
             "Linux has no per-app microphone permission outside sandboxes (Flatpak portals); skip this probe"
         }
+        ("format", "macos") => {
+            "Audio MIDI Setup (Applications > Utilities), select the device, change Format"
+        }
+        ("format", "windows") => {
+            "Control Panel > Sound (`mmsys.cpl`) > Recording > the device > Properties > Advanced > Default Format, then Apply"
+        }
         ("service", "macos") => "in another terminal: `sudo killall coreaudiod`",
         ("service", "windows") => {
             "in an administrator PowerShell: `Restart-Service audiosrv -Force`"
@@ -586,13 +610,14 @@ fn probe_list() -> Result<Outcome, Error> {
     let devices: Vec<InputDevice> = list_input_devices()?;
     for d in &devices {
         say!(
-            "  {} {} [{}] id={} stable={} channels={:?}",
+            "  {} {} [{}] id={} stable={} channels={:?}{}",
             if d.is_default { "*" } else { " " },
             d.name,
             d.backend,
             d.id,
             d.id_is_stable,
-            d.channels
+            d.channels,
+            if d.is_monitor { " monitor" } else { "" }
         );
     }
     if devices.is_empty() {
@@ -1644,9 +1669,9 @@ fn probe_sleep_raw(opts: &Opts) -> Result<Outcome, Error> {
 
 /// The sound server or audio service restarting: coreaudiod, audiosrv,
 /// PipeWire/PulseAudio. The recorder should report it (or keep going with
-/// real audio), and a new recorder in the same process should work: the
-/// library keeps one audio host per process (TODO.md, "PulseAudio server
-/// restarts").
+/// real audio), and a new recorder in the same process should work: on
+/// PulseAudio the library connects afresh for every stream
+/// (`CpalBackend::host`).
 fn probe_service_restart(opts: &Opts) -> Result<Outcome, Error> {
     let opened = open(opts.device.as_deref())?;
     let (tx, rx) = mpsc::channel();
@@ -1728,6 +1753,401 @@ fn probe_service_restart(opts: &Opts) -> Result<Outcome, Error> {
         Outcome::Pass(summary)
     } else {
         Outcome::Fail(format!("{}; {summary}", problems.join("; ")))
+    })
+}
+
+// ---- format change ----------------------------------------------------------
+
+/// The device's sample rate changed under a running stream. The library
+/// resamples from the rate it saw at open, so a stream that carried on at
+/// the new rate without a report would deliver audio at the wrong speed.
+/// It must fail the recorder (CPAL reports a CoreAudio rate change as
+/// `StreamInvalidated`), or the platform must convert.
+fn probe_format_change(opts: &Opts) -> Result<Outcome, Error> {
+    if !matches!(env::consts::OS, "macos" | "windows") {
+        return Ok(Outcome::Info(
+            "macOS and Windows only: on Linux the sound server converts, and a raw ALSA device's rate cannot change while it is open"
+                .into(),
+        ));
+    }
+    let device = choose_device(opts, "choose the device whose sample rate you will change")?;
+    let opened = open(device.as_deref())?;
+    let info = opened.recorder.info().clone();
+    let before = info.device_format.sample_rate;
+    let (tx, rx) = mpsc::channel();
+    opened
+        .recorder
+        .start(ProbeSink::with_ready(tx))
+        .map_err(Error::from)?;
+    if rx.recv_timeout(Duration::from_secs(15)).is_err() {
+        return Ok(Outcome::Fail("no audio before the change".into()));
+    }
+    prompt(&format!(
+        "Change {}'s sample rate away from {before} Hz now ({}). Note the rate you picked, then come back here.",
+        info.device.name,
+        how("format")
+    ));
+    let first = opened.recorder.stop();
+    let mut notes = Vec::new();
+    let mut problems = Vec::new();
+    // A second recording on the same recorder: refused if the recorder
+    // failed; if not, its length against wall time shows the rate it runs
+    // at.
+    let reported = match opened.failures.try_recv() {
+        Ok((_, e)) => Some(e),
+        Err(_) => first.as_ref().ok().and_then(end_error).cloned(),
+    };
+    match &reported {
+        Some(e) => notes.push(format!("reported {:?}: {e}", e.kind())),
+        None => {
+            let started = Instant::now();
+            match opened.recorder.start(ProbeSink::new()) {
+                Err(e) => notes.push(format!("start refused: {}", e.error)),
+                Ok(()) => {
+                    thread::sleep(Duration::from_secs(5));
+                    let wall = started.elapsed().as_secs_f64();
+                    match opened.recorder.stop() {
+                        Ok(s) => {
+                            let ratio = s.sink.seconds() / wall;
+                            let detail = format!(
+                                "no failure reported; a recording afterwards: {:.2} s of audio over {wall:.2} s ({ratio:.3}x)",
+                                s.sink.seconds()
+                            );
+                            if (0.97..=1.05).contains(&ratio) && s.is_complete() {
+                                notes.push(format!("{detail}: the platform converted"));
+                            } else {
+                                problems.push(format!(
+                                    "{detail}: the stream carried on at another rate, or broke, unreported ({:?})",
+                                    s.end_reason
+                                ));
+                            }
+                        }
+                        Err(e) => problems.push(format!("stop after the change: {e}")),
+                    }
+                }
+            }
+        }
+    }
+    drop(opened);
+
+    // A new recorder opens at the new rate.
+    match open(device.as_deref()) {
+        Ok(reopened) => {
+            let after = reopened.recorder.info().device_format.sample_rate;
+            if after == before {
+                notes.push(format!(
+                    "the device still runs at {before} Hz: was the rate changed?"
+                ));
+            } else {
+                notes.push(format!("device {before} Hz before, {after} Hz now"));
+            }
+            match record(&reopened, 2.0) {
+                Ok(s) if s.is_complete() && s.sink.frames > 0 => {
+                    notes.push(format!("a new recorder works: {}", s.sink.describe()))
+                }
+                Ok(s) => problems.push(format!(
+                    "a new recorder was not healthy: {:?}, {}",
+                    s.end_reason,
+                    s.sink.describe()
+                )),
+                Err(e) => problems.push(format!("a new recorder failed: {e}")),
+            }
+        }
+        Err(e) => problems.push(format!("could not open a new recorder: {e}")),
+    }
+    say!("\n>>> Set the device back to {before} Hz when you are done.");
+    let summary = notes.join("; ");
+    Ok(if problems.is_empty() {
+        Outcome::Pass(summary)
+    } else {
+        Outcome::Fail(format!("{}; {summary}", problems.join("; ")))
+    })
+}
+
+// ---- soak -------------------------------------------------------------------
+
+/// One recorder kept open the way an application keeps it: for a long
+/// time, recording now and then. Catches what short probes cannot: clock
+/// drift between the device and the resampler, memory growth, and watchdog
+/// trips on a healthy device.
+fn probe_soak(opts: &Opts) -> Result<Outcome, Error> {
+    const RECORD: Duration = Duration::from_secs(5);
+    const EVERY: Duration = Duration::from_secs(30);
+    let total = Duration::from_secs(opts.secs.unwrap_or(1800));
+    let opened = open(opts.device.as_deref())?;
+    let rss_start = rss_mb();
+    let started = Instant::now();
+    let (mut count, mut audio, mut wall) = (0u32, 0.0f64, 0.0f64);
+    let (mut lowest, mut highest) = (f64::MAX, 0.0f64);
+    let mut problems = Vec::new();
+    say!(
+        "recording {} s every {} s for {} min...",
+        RECORD.as_secs(),
+        EVERY.as_secs(),
+        total.as_secs() / 60
+    );
+    while started.elapsed() < total && problems.is_empty() {
+        let cycle = Instant::now();
+        if let Err(e) = opened.recorder.start(ProbeSink::new()) {
+            problems.push(format!("start: {}", e.error));
+            break;
+        }
+        thread::sleep(RECORD);
+        let stopped = opened.recorder.stop();
+        let took = cycle.elapsed().as_secs_f64();
+        count += 1;
+        match stopped {
+            Ok(s) => {
+                let ratio = s.sink.seconds() / took;
+                audio += s.sink.seconds();
+                wall += took;
+                lowest = lowest.min(ratio);
+                highest = highest.max(ratio);
+                say!(
+                    "  #{count} at {:.1} min: {:.3} s of audio over {took:.3} s ({ratio:.4}x), {:.1} dBFS{}",
+                    started.elapsed().as_secs_f64() / 60.0,
+                    s.sink.seconds(),
+                    s.sink.dbfs(),
+                    rss_mb().map_or(String::new(), |m| format!(", RSS {m:.1} MB"))
+                );
+                if !s.is_complete() {
+                    problems.push(format!(
+                        "recording #{count} incomplete: {:?}, {} frames dropped",
+                        s.end_reason, s.dropped_frames
+                    ));
+                } else if !(0.97..=1.05).contains(&ratio) {
+                    problems.push(format!(
+                        "recording #{count}: {:.3} s of audio over {took:.3} s",
+                        s.sink.seconds()
+                    ));
+                }
+            }
+            Err(e) => problems.push(format!("recording #{count}: stop failed: {e}")),
+        }
+        if let Ok((_, e)) = opened.failures.try_recv() {
+            problems.push(format!("the recorder failed: {e}"));
+        }
+        thread::sleep(EVERY.saturating_sub(cycle.elapsed()));
+    }
+    let memory = match (rss_start, rss_mb()) {
+        (Some(a), Some(b)) => format!("; RSS {a:.1} MB -> {b:.1} MB"),
+        _ => String::new(),
+    };
+    let summary = format!(
+        "{count} recordings over {:.1} min; audio/wall {:.4} overall, {lowest:.4}..{highest:.4} per recording{memory}",
+        started.elapsed().as_secs_f64() / 60.0,
+        if wall > 0.0 { audio / wall } else { 0.0 }
+    );
+    Ok(if problems.is_empty() {
+        Outcome::Pass(summary)
+    } else {
+        Outcome::Fail(format!("{}; {summary}", problems.join("; ")))
+    })
+}
+
+/// This process's resident memory, where the platform makes it easy to
+/// read (Linux).
+fn rss_mb() -> Option<f64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let kb: f64 = status
+        .lines()
+        .find_map(|l| l.strip_prefix("VmRSS:"))?
+        .trim()
+        .trim_end_matches("kB")
+        .trim()
+        .parse()
+        .ok()?;
+    Some(kb / 1024.0)
+}
+
+// ---- virtual disconnect ---------------------------------------------------
+
+/// A virtual PulseAudio source the probe creates and removes: an unplug
+/// without hardware. PipeWire's PulseAudio server and PulseAudio move a
+/// stream whose source goes away to another source, with no error, so this
+/// is the case the library must detect itself.
+struct VirtualSource {
+    name: String,
+    module: Option<String>,
+}
+
+impl VirtualSource {
+    fn create(tag: &str) -> Result<Self, String> {
+        let name = format!("handy_probe_{}_{tag}", std::process::id());
+        // PipeWire has no module-null-source; a null sink of the source
+        // class is its equivalent. PulseAudio has the module.
+        let attempts = [
+            vec![
+                "module-null-sink".to_owned(),
+                format!("sink_name={name}"),
+                "media.class=Audio/Source/Virtual".to_owned(),
+            ],
+            vec![
+                "module-null-source".to_owned(),
+                format!("source_name={name}"),
+            ],
+        ];
+        for args in attempts {
+            let Some(module) = pactl(&["load-module"], &args)? else {
+                continue;
+            };
+            let mut source = Self {
+                name: name.clone(),
+                module: Some(module),
+            };
+            let listed = pactl(&["list", "short", "sources"], &[])?.unwrap_or_default();
+            if listed
+                .lines()
+                .any(|l| l.split('\t').nth(1) == Some(name.as_str()))
+            {
+                return Ok(source);
+            }
+            source.remove()?;
+        }
+        Err("pactl could not create a virtual source".into())
+    }
+
+    fn id(&self) -> String {
+        format!("pulseaudio:{}", self.name)
+    }
+
+    fn remove(&mut self) -> Result<(), String> {
+        if let Some(module) = self.module.take() {
+            pactl(&["unload-module", &module], &[])?
+                .ok_or_else(|| format!("pactl could not unload module {module}"))?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for VirtualSource {
+    fn drop(&mut self) {
+        let _ = self.remove();
+    }
+}
+
+/// Runs pactl. `Ok(None)` when it ran and failed; `Err` when it could not
+/// run at all.
+fn pactl(command: &[&str], args: &[String]) -> Result<Option<String>, String> {
+    let output = std::process::Command::new("pactl")
+        .args(command)
+        .args(args)
+        .output()
+        .map_err(|e| format!("cannot run pactl: {e}"))?;
+    Ok(output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned()))
+}
+
+/// Opens a recorder on `source` once the library lists it.
+fn open_virtual(source: &VirtualSource) -> Result<Opened, String> {
+    let id = source.id();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !list_input_devices()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .any(|d| d.id == id)
+    {
+        if Instant::now() > deadline {
+            return Err(format!("{id} never appeared in list_input_devices"));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    open(Some(&id)).map_err(|e| format!("open {id}: {e}"))
+}
+
+fn probe_virtual_disconnect() -> Result<Outcome, Error> {
+    if env::consts::OS != "linux" {
+        return Ok(Outcome::Info("Linux only (PulseAudio or PipeWire)".into()));
+    }
+    let backend = list_input_devices()?.first().map(|d| d.backend.clone());
+    if backend.as_deref() != Some("PulseAudio") {
+        return Ok(Outcome::Info(format!(
+            "needs the PulseAudio host; this process uses {backend:?}"
+        )));
+    }
+    let run = || -> Result<(String, String), String> {
+        // During a recording.
+        let mut source = VirtualSource::create("recording")?;
+        let opened = open_virtual(&source)?;
+        let (tx, rx) = mpsc::channel();
+        opened
+            .recorder
+            .start(ProbeSink::with_ready(tx))
+            .map_err(|e| e.error.to_string())?;
+        rx.recv_timeout(Duration::from_secs(5))
+            .map_err(|_| "no audio from the virtual source".to_owned())?;
+        thread::sleep(Duration::from_millis(500));
+        let removed = Instant::now();
+        source.remove()?;
+        let failure = opened.failures.recv_timeout(Duration::from_secs(10)).ok();
+        let stopped = opened.recorder.stop().map_err(|e| e.to_string())?;
+        let Some((at, error)) = failure else {
+            return Err(format!(
+                "recording: no failure within 10 s of removing the source (the stream was moved to another source?); {}",
+                stopped.sink.describe()
+            ));
+        };
+        if error.kind() != ErrorKind::DeviceLost {
+            return Err(format!("recording: expected DeviceLost, got {error}"));
+        }
+        if end_error(&stopped).map(Error::kind) != Some(ErrorKind::DeviceLost) {
+            return Err(format!(
+                "recording: end reason {:?} does not carry the failure",
+                stopped.end_reason
+            ));
+        }
+        if stopped.sink.frames == 0 {
+            return Err("recording: the audio before the removal was not kept".into());
+        }
+        let during = format!(
+            "recording: DeviceLost {:.2} s after removal, {:.2} s of audio kept",
+            (at - removed).as_secs_f64(),
+            stopped.sink.seconds()
+        );
+        say!("  {during}: {error}");
+        drop(opened);
+
+        // While idle.
+        let mut source = VirtualSource::create("idle")?;
+        let opened = open_virtual(&source)?;
+        let warm = record(&opened, 0.5).map_err(|e| e.to_string())?;
+        if warm.sink.frames == 0 {
+            return Err("idle: no audio from the virtual source".into());
+        }
+        let removed = Instant::now();
+        source.remove()?;
+        let Ok((at, error)) = opened.failures.recv_timeout(Duration::from_secs(10)) else {
+            let after = record(&opened, 1.0);
+            return Err(format!(
+                "idle: no failure within 10 s of removing the source; a recording afterwards gave {:?}",
+                after.map(|s| s.sink.describe())
+            ));
+        };
+        match opened.recorder.start(ProbeSink::new()) {
+            Err(e) if e.error.kind() == ErrorKind::DeviceLost => {}
+            Err(e) => return Err(format!("idle: start returned {}", e.error)),
+            Ok(()) => return Err("idle: start succeeded on a failed recorder".into()),
+        }
+        let idle = format!(
+            "idle: {:?} {:.2} s after removal, start returned it",
+            error.kind(),
+            (at - removed).as_secs_f64()
+        );
+        say!("  {idle}");
+        Ok((during, idle))
+    };
+    Ok(match run() {
+        Ok((during, idle)) => Outcome::Pass(format!("{during}; {idle}")),
+        // The environment, not the library.
+        Err(problem)
+            if problem.starts_with("cannot run pactl")
+                || problem.starts_with("pactl could not") =>
+        {
+            Outcome::Info(problem)
+        }
+        Err(problem) => Outcome::Fail(problem),
     })
 }
 

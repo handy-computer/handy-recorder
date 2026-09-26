@@ -16,6 +16,7 @@ use super::support::{
     timeouts,
 };
 use crate::backend::{BackendError, BackendErrorKind, fake::Gate};
+use crate::capture::watchdog::CheckTime;
 use crate::{
     AudioChunk, CollectingSink, EndReason, Error, ErrorKind, Recorder, RecorderConfig, Sink,
 };
@@ -83,6 +84,50 @@ fn device_loss_during_a_recording_keeps_the_audio_and_fails_the_recorder() {
     let again = recorder.start(Chunks::default()).unwrap_err();
     assert_eq!(again.error.kind(), ErrorKind::DeviceLost);
     assert!(failures.try_recv().is_err(), "the handler fires once");
+}
+
+/// PulseAudio (PipeWire included) moves a stream whose source was removed
+/// to another source and reports nothing (measured on Fedora with a USB
+/// microphone and with a virtual source). The recorder must fail as on an
+/// unplug, not record from another microphone.
+#[test]
+fn a_device_removed_under_a_running_stream_fails_the_recording() {
+    let fake = fake(16_000, 1);
+    let (recorder, failures) = open_notified::<Chunks>(&fake, passthrough(), timeouts());
+    start(&recorder, Chunks::default());
+    let audio = ramp(0, 1000);
+    assert!(fake.push(&audio));
+    thread::sleep(Duration::from_millis(20));
+    fake.remove_device();
+
+    let error = failures
+        .recv_timeout(support::WAIT)
+        .expect("failure handler");
+    assert_eq!(error.kind(), ErrorKind::DeviceLost);
+    assert_eq!(error.detail(), Some("the fake device was removed"));
+    support::wait_until("stream torn down", || !fake.is_streaming());
+
+    let stopped = recorder.stop().expect("stop keeps the audio");
+    assert_eq!(
+        recorder_failed(&stopped.end_reason).kind(),
+        ErrorKind::DeviceLost
+    );
+    assert_eq!(stopped.sink.real(), audio);
+}
+
+#[test]
+fn a_device_removed_while_idle_fails_the_recorder() {
+    let fake = fake(16_000, 1);
+    let (recorder, failures) = open_notified::<Chunks>(&fake, passthrough(), timeouts());
+    push_idle(&recorder, &fake, &ramp(0, 160));
+    fake.remove_device();
+
+    let error = failures
+        .recv_timeout(support::WAIT)
+        .expect("failure handler");
+    assert_eq!(error.kind(), ErrorKind::DeviceLost);
+    let again = recorder.start(Chunks::default()).unwrap_err();
+    assert_eq!(again.error.kind(), ErrorKind::DeviceLost);
 }
 
 #[test]
@@ -844,7 +889,7 @@ fn a_stop_before_the_watchdog_notices_a_suspension_fails_the_recording() {
     let recorder = open_with::<Chunks>(&fake, passthrough(), t).expect("open");
     start(&recorder, Chunks::default());
     assert!(fake.push(&ramp(0, 160)));
-    *recorder.engine.shared.watchdog_checked_at.lock().unwrap() = Instant::now();
+    *recorder.engine.shared.watchdog_checked_at.lock().unwrap() = CheckTime::now();
     thread::sleep(Duration::from_millis(200));
 
     // "Awake": callbacks resume, and stop runs first. The recording fails

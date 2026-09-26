@@ -23,7 +23,7 @@ use rtrb::RingBuffer;
 use super::FrameResampler;
 use super::delivery::{self, DeliveryCmd, DeliveryPipeline};
 use super::transport::{CaptureTransportState, Routing, write_input_to_ring};
-use super::watchdog::{self, Watchdog};
+use super::watchdog::{self, CheckTime, Watchdog};
 use crate::backend::{Backend, BackendError, BackendErrorKind, InputData, InputStream};
 use crate::{
     Channels, Error, ErrorKind, Format, InputDevice, Permission, RecorderConfig, RecorderInfo,
@@ -117,7 +117,7 @@ pub(crate) struct Shared {
     recording_since: Mutex<Option<Instant>>,
     /// When the watchdog last checked. Held while it fails a recording that
     /// spanned a suspension, so `stop` sees either the gap or the failure.
-    pub(crate) watchdog_checked_at: Mutex<Instant>,
+    pub(crate) watchdog_checked_at: Mutex<CheckTime>,
     device_tx: mpsc::Sender<DeviceMsg>,
 }
 
@@ -132,7 +132,7 @@ impl Shared {
             survived_errors: AtomicU64::new(0),
             xruns: AtomicU64::new(0),
             recording_since: Mutex::new(None),
-            watchdog_checked_at: Mutex::new(Instant::now()),
+            watchdog_checked_at: Mutex::new(CheckTime::now()),
             device_tx,
         }
     }
@@ -809,6 +809,13 @@ fn run_device(
 
         if stream.is_some() && shared.failure.get().is_none() {
             watchdog.check(&shared, &timeouts);
+        }
+
+        if let Some(open) = stream.as_mut()
+            && shared.failure.get().is_none()
+            && let Err(error) = open.check_device()
+        {
+            shared.fail(runtime_error(backend, &shared, error));
         }
 
         if let Some(error) = shared.failure()

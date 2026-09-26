@@ -8,6 +8,8 @@ use std::{
 };
 
 mod error;
+#[cfg(target_os = "linux")]
+mod pulse;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use error::{map_error, map_error_during};
@@ -19,11 +21,15 @@ use super::{
 use crate::{InputDevice, Permission};
 
 pub(crate) struct CpalBackend {
-    host: cpal::Host,
+    /// The host cpal picked, once for the process.
+    id: cpal::HostId,
+    /// The host every operation uses; `None` when it is PulseAudio, where
+    /// each operation connects afresh (`host`).
+    shared: Option<cpal::Host>,
 }
 
-// One host for the process: the PulseAudio host opens a server connection
-// when created. Both are thread-safe on every target this compiles for.
+// One host for the process, where it holds no server connection (on Linux,
+// ALSA). Both are thread-safe on every target this compiles for.
 const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<cpal::Host>();
@@ -32,7 +38,6 @@ const _: () = {
 
 impl CpalBackend {
     /// The process-wide backend.
-    // TODO(review): see TODO.md, "PulseAudio server restarts".
     pub fn shared() -> Arc<Self> {
         static SHARED: OnceLock<Arc<CpalBackend>> = OnceLock::new();
         Arc::clone(SHARED.get_or_init(|| Arc::new(Self::new())))
@@ -41,10 +46,54 @@ impl CpalBackend {
     /// cpal's default host. On Linux that is PulseAudio when a server is
     /// running (the `pulseaudio` feature in Cargo.toml), otherwise ALSA.
     pub fn new() -> Self {
+        let host = cpal::default_host();
+        let id = host.id();
         Self {
-            host: cpal::default_host(),
+            id,
+            // The connection that picked PulseAudio is dropped here.
+            shared: (!is_pulseaudio(id)).then_some(host),
         }
     }
+
+    /// The host for one operation. PulseAudio gets a new server connection
+    /// for every stream and every listing: a sound server restart kills a
+    /// connection for good, so a long-lived one would fail every later open
+    /// (measured on PipeWire 1.4). A stream's device keeps its connection
+    /// alive; connecting takes a few milliseconds.
+    fn host(&self) -> Result<HostRef<'_>, BackendError> {
+        match &self.shared {
+            Some(host) => Ok(HostRef::Shared(host)),
+            None => cpal::host_from_id(self.id)
+                .map(HostRef::Own)
+                .map_err(|e| map_error_during("Failed to connect to PulseAudio", e)),
+        }
+    }
+}
+
+/// The shared host, or one of the operation's own.
+enum HostRef<'a> {
+    Shared(&'a cpal::Host),
+    Own(cpal::Host),
+}
+
+impl std::ops::Deref for HostRef<'_> {
+    type Target = cpal::Host;
+
+    fn deref(&self) -> &cpal::Host {
+        match self {
+            HostRef::Shared(host) => host,
+            HostRef::Own(host) => host,
+        }
+    }
+}
+
+fn is_pulseaudio(host: cpal::HostId) -> bool {
+    #[cfg(target_os = "linux")]
+    if host == cpal::HostId::PulseAudio {
+        return true;
+    }
+    let _ = host;
+    false
 }
 
 fn device_name(device: &cpal::Device) -> String {
@@ -63,6 +112,30 @@ fn id_is_stable(host: cpal::HostId) -> bool {
     }
     let _ = host;
     true
+}
+
+/// ALSA's `null` PCM, which it lists as an input: capturing from it
+/// delivers zeros as fast as they can be read (104 s of audio in a 3 s
+/// recording). Left out of the device list, so it cannot be opened either.
+fn is_null_pcm(id: &cpal::DeviceId) -> bool {
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+    if id.host() == cpal::HostId::Alsa {
+        return id.id() == "null";
+    }
+    let _ = id;
+    false
+}
+
+/// Whether a device records another device's output: a PulseAudio monitor
+/// source. The server names every monitor `<sink>.monitor` (the source
+/// info's "Monitor of Sink"), and cpal passes on only the name.
+fn is_monitor(id: &cpal::DeviceId) -> bool {
+    #[cfg(target_os = "linux")]
+    if id.host() == cpal::HostId::PulseAudio {
+        return id.id().ends_with(".monitor");
+    }
+    let _ = id;
+    false
 }
 
 /// Reads a device's channel count without opening it: the channel count of
@@ -91,15 +164,19 @@ fn enumerate(
     let mut occurrences = HashMap::<String, u32>::new();
     let mut out = Vec::new();
     for device in host.input_devices().map_err(map_error)? {
+        if device.id().is_ok_and(|id| is_null_pcm(&id)) {
+            continue;
+        }
         let name = device_name(&device);
         let occurrence = occurrences.entry(name.clone()).or_default();
-        let (id, stable, is_default) = match device.id() {
+        let (id, stable, is_default, monitor) = match device.id() {
             Ok(id) => (
                 id.to_string(),
                 id_is_stable(id.host()),
                 default_id.as_ref() == Some(&id),
+                is_monitor(&id),
             ),
-            Err(_) => (format!("{name}#{occurrence}"), false, false),
+            Err(_) => (format!("{name}#{occurrence}"), false, false, false),
         };
         out.push((
             InputDevice {
@@ -114,6 +191,7 @@ fn enumerate(
                 } else {
                     None
                 },
+                is_monitor: monitor,
             },
             device,
         ));
@@ -134,7 +212,8 @@ impl Backend for CpalBackend {
     }
 
     fn list_input_devices(&self) -> Result<Vec<InputDevice>, BackendError> {
-        Ok(enumerate(&self.host, true)?
+        let host = self.host()?;
+        Ok(enumerate(&host, true)?
             .into_iter()
             .map(|(info, _)| info)
             .collect())
@@ -142,8 +221,9 @@ impl Backend for CpalBackend {
 
     fn open_device(&self, id: Option<&str>) -> Result<Box<dyn OpenDevice>, BackendError> {
         // TODO(review): see TODO.md, "Device enumeration on every open".
-        let host = &self.host;
         let resolve_started = Instant::now();
+        let host = self.host()?;
+        let host = &*host;
         let (mut info, device) = match id {
             Some(id) => enumerate(host, false)?
                 .into_iter()
@@ -182,6 +262,7 @@ impl Backend for CpalBackend {
                             occurrence: 0,
                             backend: host.id().name().to_owned(),
                             is_default: true,
+                            is_monitor: id.as_ref().is_some_and(is_monitor),
                             id_is_stable: id.is_some_and(|id| id_is_stable(id.host())),
                             channels: None,
                         };
@@ -225,6 +306,7 @@ impl Backend for CpalBackend {
         info.channels = Some(config.channels());
 
         Ok(Box::new(CpalOpenDevice {
+            host: host.id(),
             info,
             device_id: device.id().ok(),
             device,
@@ -239,6 +321,10 @@ impl Backend for CpalBackend {
 }
 
 struct CpalOpenDevice {
+    /// Which host opened the device: PulseAudio needs a fragment size and a
+    /// source watch.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    host: cpal::HostId,
     info: InputDevice,
     device: cpal::Device,
     device_id: Option<cpal::DeviceId>,
@@ -254,9 +340,20 @@ struct CpalStream {
     /// The silent output stream holding the headset (`take_headset`).
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     headset: Option<cpal::Stream>,
+    /// Watches that the PulseAudio source still exists.
+    #[cfg(target_os = "linux")]
+    watch: Option<pulse::SourceWatch>,
 }
 
 impl InputStream for CpalStream {
+    #[cfg(target_os = "linux")]
+    fn check_device(&mut self) -> Result<(), BackendError> {
+        match &mut self.watch {
+            Some(watch) => watch.check(),
+            None => Ok(()),
+        }
+    }
+
     #[cfg(target_os = "macos")]
     fn hold_headset(&mut self, hold: bool) {
         if !hold {
@@ -338,20 +435,34 @@ impl OpenDevice for CpalOpenDevice {
         data: DataCallback,
         error: ErrorCallback,
     ) -> Result<Box<dyn InputStream>, BackendError> {
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        let mut config = self.config.config();
+        #[cfg(target_os = "linux")]
+        let watch = match &self.device_id {
+            Some(id) if self.host == cpal::HostId::PulseAudio => pulse::SourceWatch::start(id.id()),
+            _ => None,
+        };
+        #[cfg(target_os = "linux")]
+        if self.host == cpal::HostId::PulseAudio {
+            let frames = pulse::fragment_frames(config.sample_rate);
+            log::debug!("requesting {frames}-frame fragments from PulseAudio");
+            config.buffer_size = cpal::BufferSize::Fixed(frames);
+        }
         let build_started = Instant::now();
+        let device = &self.device;
         let stream = match self.format.sample_format {
-            SampleFormat::U8 => build_stream::<u8>(&self.device, &self.config, data, error),
-            SampleFormat::I8 => build_stream::<i8>(&self.device, &self.config, data, error),
-            SampleFormat::U16 => build_stream::<u16>(&self.device, &self.config, data, error),
-            SampleFormat::I16 => build_stream::<i16>(&self.device, &self.config, data, error),
-            SampleFormat::U24 => build_stream::<cpal::U24>(&self.device, &self.config, data, error),
-            SampleFormat::I24 => build_stream::<cpal::I24>(&self.device, &self.config, data, error),
-            SampleFormat::U32 => build_stream::<u32>(&self.device, &self.config, data, error),
-            SampleFormat::I32 => build_stream::<i32>(&self.device, &self.config, data, error),
-            SampleFormat::U64 => build_stream::<u64>(&self.device, &self.config, data, error),
-            SampleFormat::I64 => build_stream::<i64>(&self.device, &self.config, data, error),
-            SampleFormat::F32 => build_stream::<f32>(&self.device, &self.config, data, error),
-            SampleFormat::F64 => build_stream::<f64>(&self.device, &self.config, data, error),
+            SampleFormat::U8 => build_stream::<u8>(device, config, data, error),
+            SampleFormat::I8 => build_stream::<i8>(device, config, data, error),
+            SampleFormat::U16 => build_stream::<u16>(device, config, data, error),
+            SampleFormat::I16 => build_stream::<i16>(device, config, data, error),
+            SampleFormat::U24 => build_stream::<cpal::U24>(device, config, data, error),
+            SampleFormat::I24 => build_stream::<cpal::I24>(device, config, data, error),
+            SampleFormat::U32 => build_stream::<u32>(device, config, data, error),
+            SampleFormat::I32 => build_stream::<i32>(device, config, data, error),
+            SampleFormat::U64 => build_stream::<u64>(device, config, data, error),
+            SampleFormat::I64 => build_stream::<i64>(device, config, data, error),
+            SampleFormat::F32 => build_stream::<f32>(device, config, data, error),
+            SampleFormat::F64 => build_stream::<f64>(device, config, data, error),
         }
         .map_err(|e| map_error_during("Failed to build input stream", e))?;
         let build_elapsed = build_started.elapsed();
@@ -369,13 +480,15 @@ impl OpenDevice for CpalOpenDevice {
             _stream: stream,
             device_id: self.device_id,
             headset: None,
+            #[cfg(target_os = "linux")]
+            watch,
         }))
     }
 }
 
 fn build_stream<T>(
     device: &cpal::Device,
-    config: &cpal::SupportedStreamConfig,
+    config: cpal::StreamConfig,
     mut data: DataCallback,
     mut error: ErrorCallback,
 ) -> Result<cpal::Stream, cpal::Error>
@@ -383,7 +496,7 @@ where
     T: cpal::SizedSample + InputSample,
 {
     device.build_input_stream(
-        config.config(),
+        config,
         move |samples: &[T], _: &cpal::InputCallbackInfo| data(T::wrap(samples)),
         // May run on the platform audio thread. Converting allocates the
         // message; this happens only when the stream reports an error.

@@ -40,6 +40,9 @@ struct State {
     denial_fails_stream: bool,
     /// Every `hold_headset` call, in order.
     headset_holds: Vec<bool>,
+    /// The device is gone, but the stream keeps running (PulseAudio moves
+    /// it to another source): `check_device` reports it.
+    removed: bool,
 }
 
 /// Holds a platform call until opened, like a driver that hangs.
@@ -72,6 +75,7 @@ impl FakeBackend {
                     is_default: true,
                     id_is_stable: true,
                     channels: Some(format.channels),
+                    is_monitor: false,
                 },
                 format,
                 state: Mutex::default(),
@@ -128,6 +132,12 @@ impl FakeBackend {
 
     pub fn set_denial_fails_stream(&self) {
         self.shared.state.lock().unwrap().denial_fails_stream = true;
+    }
+
+    /// Removes the device without failing the stream, as the PulseAudio
+    /// server does when it moves the stream to another source.
+    pub fn remove_device(&self) {
+        self.shared.state.lock().unwrap().removed = true;
     }
 
     pub fn is_streaming(&self) -> bool {
@@ -209,6 +219,16 @@ struct FakeStream(FakeBackend);
 impl InputStream for FakeStream {
     fn hold_headset(&mut self, hold: bool) {
         self.0.shared.state.lock().unwrap().headset_holds.push(hold);
+    }
+
+    fn check_device(&mut self) -> Result<(), BackendError> {
+        if self.0.shared.state.lock().unwrap().removed {
+            return Err(BackendError::new(
+                BackendErrorKind::DeviceNotAvailable,
+                "the fake device was removed",
+            ));
+        }
+        Ok(())
     }
 }
 

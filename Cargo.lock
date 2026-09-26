@@ -96,8 +96,7 @@ dependencies = [
 [[package]]
 name = "cpal"
 version = "0.18.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f02e8d0327b42d3e2e4ab2119af397344eb9fc54a34bf0ddeaa1277af8681f1"
+source = "git+https://github.com/handy-computer/cpal?rev=053b6f6a62d428b65b586f80079ba34d0cbf5fb1#053b6f6a62d428b65b586f80079ba34d0cbf5fb1"
 dependencies = [
  "alsa",
  "block2",
@@ -253,10 +252,13 @@ version = "0.0.0"
 dependencies = [
  "cpal",
  "dasp_sample",
+ "futures",
+ "libc",
  "log",
  "objc2-av-foundation",
  "objc2-core-audio",
  "objc2-core-foundation",
+ "pulseaudio",
  "rtrb",
  "rubato",
  "windows",

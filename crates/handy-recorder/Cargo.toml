@@ -15,12 +15,24 @@ rtrb = "0.4.0"
 # is a tracked pre-release item (DESIGN.md, "Before the first release").
 rubato = "=0.16.2"
 
+# CPAL 0.18.2 plus one fix, until a CPAL release has it: a fixed-size
+# PulseAudio record stream's buffer is no longer capped at one fragment,
+# which stalled it on PulseAudio and starved a second stream on one
+# connection under pipewire-pulse (tools/probe/README.md, "Results so far").
+# Branch `pulseaudio-record-max-length` of handy-computer/cpal; only the
+# PulseAudio host differs from 0.18.2. A git dependency rather than a
+# `[patch]`, so that crates depending on this one get the fix too.
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-cpal = "0.18.2"
+cpal = { git = "https://github.com/handy-computer/cpal", rev = "053b6f6a62d428b65b586f80079ba34d0cbf5fb1" }
 
 # The native PulseAudio host (also serves pipewire-pulse), with ALSA fallback.
+# `pulseaudio` and `futures` (the versions cpal's host uses) watch that the
+# opened source still exists; `libc` reads CLOCK_BOOTTIME.
 [target.'cfg(target_os = "linux")'.dependencies]
-cpal = { version = "0.18.2", features = ["pulseaudio"] }
+cpal = { git = "https://github.com/handy-computer/cpal", rev = "053b6f6a62d428b65b586f80079ba34d0cbf5fb1", features = ["pulseaudio"] }
+futures = { version = "0.3", default-features = false, features = ["executor"] }
+libc = "0.2"
+pulseaudio = "0.3"
 
 # Microphone permission status (the privacy settings' registry values). The
 # same crate and version cpal's WASAPI host uses.

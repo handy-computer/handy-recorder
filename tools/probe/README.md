@@ -64,7 +64,7 @@ a laptop behave differently around sleep and Bluetooth).
 | # | Command | Do | Expect |
 | --- | --- | --- | --- |
 | 1 | `list` | nothing | every microphone listed, one default, `channels` set (except ALSA) |
-| 2 | `auto` | nothing (about 40 s) | all PASS on the built-in or USB microphone |
+| 2 | `auto` | nothing (about 45 s) | all PASS on the built-in or USB microphone (`virtual-disconnect` runs on Linux only) |
 | 3 | `disconnect-recording` | pick the USB mic; unplug when told; replug | PASS: `DeviceLost` (or `StreamInvalidated`) within a few seconds, audio before it kept, a new recorder works after replug |
 | 4 | `disconnect-idle` | the same, while idle | PASS |
 | 5 | `disconnect-recording` | pick the Bluetooth headset; turn it off or case it | PASS |
@@ -78,6 +78,8 @@ a laptop behave differently around sleep and Bluetooth).
 | 11 | `sleep-raw --device <built-in id>` | the same | INFO: callbacks RESUMED; note the gap lengths |
 | 12 | `audio-service-restart` | restart the audio service when told | PASS: reported (or real audio throughout), and a new recorder in the same process works |
 | 13 | `permission` | revoke microphone access first | INFO: `open` fails with `PermissionDenied` |
+| 14 | `format-change` | macOS and Windows: change the device's sample rate when told; set it back afterwards | PASS: reported (expect `StreamInvalidated`), or the platform converts and a recording afterwards has the right length; a new recorder opens at the new rate |
+| 15 | `soak` | nothing (30 min; `--secs` to change) | PASS: every recording complete and the right length, no failure, memory flat |
 
 `all` runs the whole list, asking before each interactive probe.
 
@@ -121,9 +123,12 @@ of Modern Standby), and exclusive mode. Notes:
 
 ### Linux
 
-The first real run of the PulseAudio host. Run the checklist on PipeWire
-(with `pipewire-pulse`, most current distributions) and, if possible, on
-plain PulseAudio; the results header says which ("sound server").
+Done on a ThinkPad T14 (AMD), Fedora 43, PipeWire 1.4.11, 2026-09-26,
+and on plain PulseAudio and pipewire-pulse in containers and CI (see
+"Results so far").
+Still to do: Bluetooth, and plain PulseAudio on a machine that runs it
+(sound card, unplug, sleep). The results header says which sound server
+ran ("sound server").
 
 - **Host:** `list` should show devices with backend `PulseAudio`. `ALSA`
   means the PulseAudio host was unavailable and the library fell back;
@@ -132,16 +137,37 @@ plain PulseAudio; the results header says which ("sound server").
   output); note them (an open decision in DESIGN.md).
 - **Sharing (2: `second-process`, 7):** the most important Linux checks.
   Through the sound server both should PASS; raw ALSA devices are exclusive.
+- **Disconnects (3, 4):** the sound server moves a stream whose source
+  went away to another source, with no error; the library checks once a
+  second that its source still exists. `virtual-disconnect` (in `auto`)
+  checks the same with a virtual source and no hardware.
 - **Service restart (12):** PipeWire:
   `systemctl --user restart pipewire pipewire-pulse wireplumber`;
-  PulseAudio: `pulseaudio -k`. The reopen half is expected to FAIL today:
-  the library keeps one server connection per process and does not
-  reconnect yet (TODO.md, "PulseAudio server restarts"). The result tells
-  us what to fix.
+  PulseAudio: `pulseaudio -k`.
 - **Sleep (9-11):** `systemctl suspend`.
 - **Bluetooth (5, 6):** switching to the headset's microphone may need its
   profile set to headset (HSP/HFP) in the sound settings.
 - **Permission (13):** not applicable outside sandboxes; skip.
+- **CI:** `tools/probe/ci/pulseaudio.sh` (plain PulseAudio) and
+  `tools/probe/ci/pipewire.sh` (pipewire-pulse) run `auto` on Ubuntu
+  24.04, the input a null sink's monitor playing noise;
+  `virtual-disconnect` must PASS, which it only does on the PulseAudio
+  host. Both run locally in an `ubuntu:24.04` container (podman or
+  docker) as a non-root user, with the packages the workflow installs.
+- **Finding the server:** CPAL's PulseAudio client looks only at
+  `XDG_RUNTIME_DIR`, `PULSE_RUNTIME_PATH` and `PULSE_SERVER`; libpulse
+  (and so `pactl`) also looks elsewhere. With none of them set (a bare
+  container, `sudo`), `pactl` works but the library falls back to ALSA
+  through the server's ALSA plugin, and every probe but
+  `virtual-disconnect` still passes.
+- **ALSA (no sound server):** the fallback. Stop the sound server first
+  (PipeWire: `systemctl --user stop pipewire.socket pipewire-pulse.socket
+  pipewire pipewire-pulse wireplumber`; `start` them again afterwards);
+  `list` then shows backend `ALSA`. Pass `--device alsa:plughw:CARD=<n>,DEV=0`
+  (`arecord -l` lists the cards): `default` usually routes to the sound
+  server's ALSA plugin, which hangs without it (`OpenTimedOut` after 10
+  s). Raw devices are exclusive, so `two-clients` and `second-process`
+  fail with `DeviceBusy` by design.
 
 ## Reading results
 
@@ -171,6 +197,7 @@ plain PulseAudio; the results header says which ("sound server").
 | `slow-start` | time from open to first audio | a Bluetooth headset |
 | `disconnect-recording` | failure reported, audio before it kept, `start` returns it, reopen after reconnect works | a removable device |
 | `disconnect-idle` | the same while the recorder is open but idle | a removable device |
+| `virtual-disconnect` | Linux: a virtual PulseAudio source removed during a recording and while idle: `DeviceLost`, audio before it kept | `pactl` |
 | `bluetooth-handoff` | a shared headset moving to the phone mid-recording and back: reported, not silent | a headset paired with a phone |
 | `replug` | silence after replugging a USB device: a fresh process vs this process | a USB device |
 | `default-change` | changing the system default input mid-recording (informational) | two inputs |
@@ -178,6 +205,8 @@ plain PulseAudio; the results header says which ("sound server").
 | `sleep-raw` | a raw CPAL stream (no library, no watchdog) across sleep: callback gaps, errors, whether it resumes | the built-in mic |
 | `audio-service-restart` | the OS audio service restarting mid-recording; a new recorder in the same process afterwards | admin rights (Windows, macOS) |
 | `permission` | what `open` does with access denied (informational) | access revoked |
+| `format-change` | the device's sample rate changed during a recording: reported, or converted; never audio at the wrong speed | macOS or Windows |
+| `soak` | one recorder open for `--secs` (default 30 min), a 5 s recording every 30 s: completeness, length drift, memory (Linux), watchdog false positives | time |
 
 `auto` runs every probe that needs no operator action.
 
@@ -245,3 +274,122 @@ only), built-in Intel Smart Sound mic array and USB-C EarPods, both 48 kHz
   access your microphone" while a recorder is open (`hold --secs 30`)
   fails its stream with AUDCLNT_E_DEVICE_INVALIDATED, the unplug code;
   before the fix it read as `DeviceLost`, now as `PermissionDenied`.
+
+Fedora 43 (KDE), ThinkPad T14 (AMD Ryzen, s2idle), PipeWire 1.4.11 with
+pipewire-pulse, built-in digital microphone and USB-C EarPods, 2026-09-26.
+Before the fixes (these results led to them):
+
+- Host `PulseAudio`; sharing works: `second-process`, `two-clients`,
+  `external-app`, and `meeting-app` (Jitsi in Firefox, both orders) PASS.
+- Every open took 2.0-2.1 s, and audio arrived in 8192-frame (170 ms)
+  blocks: CPAL requests no fragment size, and the server's default is 2 s,
+  which CPAL's `play` waits out. Requesting 1024 frames fixes both (open
+  80-140 ms); smaller requests (480, 960) shrank PipeWire's graph quantum
+  for every application (`pw-top`). With fixed fragments, a second stream
+  on one server connection starved, so each stream now connects on its
+  own.
+- Disconnects: no failure. Unplugging the EarPods moved the stream to the
+  built-in microphone (the server sends `RecordStreamMoved`, which CPAL's
+  pulseaudio crate ignores); the recording carried on with the other
+  microphone's audio. Reproduced by removing a virtual source
+  (`virtual-disconnect`). With the source check, `DeviceLost` about 0.5 s
+  after removal. A default-input change leaves the stream on its source.
+- The EarPods deliver 0.7 to over 3 s of exact zeros each time their
+  source resumes from suspend (raw CPAL too), so `baseline` on them FAILs
+  on digital silence.
+- The built-in microphone carries a DC offset (channel 1 about +0.29,
+  channel 0 about +0.04), so its level reads -16.6 dBFS whatever the room
+  does; the probes' levels do not remove it.
+- Sleep: an idle recorder survives. A recording across a 110 s sleep
+  carried on with no failure: the process is frozen, and `Instant`
+  (`CLOCK_MONOTONIC`) stops (`sleep-raw`: 54.4 s of wall time, 1.8 s of
+  `Instant`). Fixed with `CLOCK_BOOTTIME`; to be confirmed.
+- Audio service restart: `StreamInvalidated` ("PulseAudio disconnected"),
+  audio before it kept; reopening in the same process failed for 15 s.
+  Fixed by connecting per stream; to be confirmed.
+- ALSA fallback (`PULSE_SERVER` pointing nowhere): 14 devices with
+  duplicate names, the `null` PCM among them; a `hw:` device PipeWire
+  holds fails with `DeviceBusy`; `default` records through PipeWire.
+
+After the fixes, same machine and day:
+
+- Open 80-140 ms; `auto` all PASS on the built-in microphone, with
+  `virtual-disconnect` (`DeviceLost` about 0.5 s after removal).
+- Unplugging the EarPods: `DeviceLost`, recording and idle, audio before
+  it kept; a new recorder after replugging records real audio.
+- Sleep across a recording: `Stalled`, "the process was suspended for
+  113.2 s during a recording", reported on wake.
+- Audio service restart (twice): `StreamInvalidated`, audio before it
+  kept; a new recorder in the same process records at once.
+- `soak` (30 min, built-in microphone): 60 recordings, all complete;
+  audio/wall 1.0044 overall, 1.0015-1.0075 each (the start and stop
+  edges, no drift); RSS 13.3 MB -> 14.5 MB, flat after the first minutes;
+  no warnings.
+
+Plain PulseAudio 15.99.1, Ubuntu 22.04 container (podman, on the Fedora
+machine), `tools/probe/ci/pulseaudio.sh`, 2026-09-26:
+
+- CPAL's fixed-size streams break on PulseAudio itself: CPAL caps the
+  server-side buffer at one fragment, and the stream then delivers one
+  callback and nothing more (882 to 4410 frames tried). Without the cap
+  (a one-line change in CPAL: branch `pulseaudio-record-max-length` of
+  github.com/handy-computer/cpal, the library's CPAL dependency),
+  fixed fragments work. It happens when the
+  source delivers more than a fragment at a time (here, likely because
+  `pacat`'s 50 ms latency sets the null sink's; not verified); an idle
+  null monitor or a sound card with timer
+  scheduling (`tsched=1`) shrinks its blocks and works even with the cap.
+  With `tsched=0`, the built-in microphone lost 7-12% of its audio at
+  480-frame fragments with the cap and none without it.
+- The cap is not what starves a second stream on one connection under
+  pipewire-pulse: at 1024-frame fragments that happens with and without
+  it, in release builds. One connection per stream avoids it.
+- Without fixed fragments, PulseAudio's default is as coarse as
+  PipeWire's on a source that honors latency (a null source: `play` took
+  3.8 s): opens up to 1.9 s, a 3 s recording returned 2.35 s (the end
+  was still in the server's buffer), warm recordings 2.4-25x their hold;
+  `two-clients` and `second-process` FAIL.
+- With the patched CPAL and 1024-frame fragments: `auto` all PASS, twice;
+  open about 11 ms; warm recordings 1.09-1.46x their hold;
+  `virtual-disconnect` `DeviceLost` about 0.5 s after removal (the source
+  check works on PulseAudio too).
+- `module-sine-source` delivers 350 ms blocks whatever is requested; the
+  script uses a null sink's monitor playing noise instead.
+- The pulseaudio crate's reader zero-fills 1 MB on every socket read. In
+  a debug build it fell behind a source sending 400 packets a second (2.5
+  ms each) and never recovered: a server reply never arrived, and closing
+  the stream hung. Release builds keep up; the script runs the probe in
+  release. A sound card at 1024-frame fragments sends about 47 a second,
+  so a debug build of an application is likely fine, but not tested
+  (TODO.md).
+
+Raw ALSA (PipeWire stopped), same Fedora machine, 2026-09-26:
+
+- The library falls back to ALSA by itself. `default` routes to
+  PipeWire's ALSA plugin and hangs without a server (`OpenTimedOut`
+  after 10 s).
+- Built-in microphone (`plughw` and `hw`): `baseline`, `warm-cycles`,
+  `slow-sink` PASS, open about 40 ms. `two-clients` and `second-process`
+  fail with `DeviceBusy`: raw devices are exclusive.
+- The EarPods deliver exact zeros in a quiet room (8 s, apart from tiny
+  blips) on raw ALSA too: the headset gates silence to digital zero; it
+  is not the sound server.
+- Unplugging the EarPods (`sysdefault:CARD=Earpods`): `DeviceLost` ("The
+  requested audio device is not available"), recording and idle, about
+  3 s after the prompt; audio before it kept; reopening after the replug
+  works. ALSA reports the unplug itself; no source check is involved.
+- Sleep across a recording: `Stalled`, "the process was suspended for
+  53.3 s", as on PipeWire.
+
+Ubuntu 24.04 containers (podman, on the Fedora machine),
+`tools/probe/ci/pulseaudio.sh` and `tools/probe/ci/pipewire.sh`,
+2026-09-26:
+
+- Plain PulseAudio 16.1 and PipeWire 1.0.5 (pipewire-pulse, WirePlumber,
+  no sound card): `auto` all PASS on both; `virtual-disconnect`
+  `DeviceLost` 0.45-0.49 s after removal. Opens about 10 ms on
+  PulseAudio, 25-115 ms on PipeWire.
+- The first run without `XDG_RUNTIME_DIR` fell back to ALSA through
+  PulseAudio's ALSA plugin: every probe passed but `virtual-disconnect`,
+  which reported INFO, so the scripts now set it and require that probe
+  to PASS.

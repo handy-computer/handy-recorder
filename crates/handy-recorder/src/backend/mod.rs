@@ -58,6 +58,16 @@ pub(crate) trait InputStream {
     /// effort: a backend logs what it could not do. A no-op where it does not
     /// apply.
     fn hold_headset(&mut self, _hold: bool) {}
+
+    /// Checks that the device the stream was opened on still exists, where
+    /// the platform does not fail the stream when it goes away: the
+    /// PulseAudio server (PipeWire's included) moves the stream to another
+    /// source instead, with no error. `Err` (`DeviceNotAvailable`) when the
+    /// device is gone. Called on the device thread at every watchdog tick,
+    /// so it must not block.
+    fn check_device(&mut self) -> Result<(), BackendError> {
+        Ok(())
+    }
 }
 
 /// Receives each block of interleaved device samples. Called on the

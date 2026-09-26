@@ -25,7 +25,7 @@ impl Watchdog {
         let now = Instant::now();
         // Opening took a while before the watchdog existed; that is not a
         // suspension.
-        *shared.watchdog_checked_at.lock().unwrap() = now;
+        *shared.watchdog_checked_at.lock().unwrap() = CheckTime::now();
         Self {
             opened_at: now,
             callbacks: 0,
@@ -37,19 +37,24 @@ impl Watchdog {
     }
 
     pub(super) fn check(&mut self, shared: &Shared, timeouts: &Timeouts) {
-        let now = Instant::now();
+        let checked = CheckTime::now();
+        let now = checked.instant;
         let recording_since = shared.recording_since();
-        let suspended = {
+        let (suspended, frozen) = {
             let mut checked_at = shared.watchdog_checked_at.lock().unwrap();
-            let suspended = suspension(*checked_at, now, recording_since, timeouts.stall);
-            *checked_at = now;
+            let suspended = suspension(*checked_at, checked, recording_since, timeouts.stall);
+            // How far `Instant` moved while the watchdog was frozen: all of a
+            // sleep where it counts sleep (Windows), little of it where it
+            // does not (Linux).
+            let frozen = now.saturating_duration_since(checked_at.instant);
+            *checked_at = checked;
             // Failed under the lock: `stop` reads the same timestamp.
             if let Suspension::DuringRecording(gap) = suspended {
                 let error = suspended_during_recording(shared, gap, timeouts.stall);
                 log::warn!("watchdog tripped: {error}");
                 shared.fail(error);
             }
-            suspended
+            (suspended, frozen)
         };
         if let Suspension::WhileIdle(gap) = suspended {
             // Every thread of the process was frozen, so the gap is evidence
@@ -59,9 +64,9 @@ impl Watchdog {
                 "the process was suspended for {:.1} s while idle (system sleep?)",
                 gap.as_secs_f64()
             );
-            self.opened_at += gap;
-            self.last_callback_at += gap;
-            self.last_heartbeat_at += gap;
+            self.opened_at += frozen;
+            self.last_callback_at += frozen;
+            self.last_heartbeat_at += frozen;
         }
         let callbacks = shared.transport.callbacks.load(Ordering::Relaxed);
         if callbacks != self.callbacks {
@@ -154,9 +159,12 @@ pub(super) fn fail_if_suspended(shared: &Shared, timeouts: &Timeouts) {
     }
     // Held while failing, as in `Watchdog::check`.
     let checked_at = shared.watchdog_checked_at.lock().unwrap();
-    if let Suspension::DuringRecording(gap) =
-        suspension(*checked_at, Instant::now(), recording_since, timeouts.stall)
-    {
+    if let Suspension::DuringRecording(gap) = suspension(
+        *checked_at,
+        CheckTime::now(),
+        recording_since,
+        timeouts.stall,
+    ) {
         let error = suspended_during_recording(shared, gap, timeouts.stall);
         log::warn!("{error}");
         shared.fail(error);
@@ -172,6 +180,53 @@ fn suspended_during_recording(shared: &Shared, gap: Duration, stall: Duration) -
     ))
 }
 
+/// When the watchdog checked, on `Instant` and on a clock that counts time
+/// the system was asleep.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CheckTime {
+    pub instant: Instant,
+    /// Time since an arbitrary fixed point, sleep included.
+    with_sleep: Duration,
+}
+
+impl CheckTime {
+    pub(crate) fn now() -> Self {
+        let with_sleep = with_sleep_now();
+        Self {
+            instant: Instant::now(),
+            with_sleep,
+        }
+    }
+
+    /// Time from `earlier` to `self`, sleep included.
+    fn since(&self, earlier: &Self) -> Duration {
+        self.with_sleep.saturating_sub(earlier.with_sleep)
+    }
+}
+
+/// `Instant` is `CLOCK_MONOTONIC` on Linux, which stops during suspend, and
+/// Linux freezes the process as it suspends (measured with `sleep-raw`:
+/// 54 s asleep, 1.8 s of `Instant`), so only `CLOCK_BOOTTIME` shows the gap.
+#[cfg(target_os = "linux")]
+fn with_sleep_now() -> Duration {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // Cannot fail with a valid clock ID and pointer.
+    unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut ts) };
+    Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+}
+
+/// `Instant` counts sleep on Windows (QPC). On macOS it does not, but
+/// callbacks stop seconds before the process is suspended, so the stall
+/// check sees the sleep instead.
+#[cfg(not(target_os = "linux"))]
+fn with_sleep_now() -> Duration {
+    static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    ORIGIN.get_or_init(Instant::now).elapsed()
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Suspension {
     None,
@@ -180,25 +235,23 @@ enum Suspension {
 }
 
 /// Whether the watchdog's thread was frozen since its last check, and so the
-/// whole process with it. Windows (Modern Standby) suspends the process
-/// during sleep: callbacks and the watchdog stop together and resume
+/// whole process with it. Windows (Modern Standby) and Linux suspend the
+/// process during sleep: callbacks and the watchdog stop together and resume
 /// together, so on wake a callback can arrive before the next check and the
-/// stall check never sees the gap. `Instant` counts sleep there, so a gap
-/// between checks of at least the stall bound, during a recording that began
-/// before it, is the same gap in the audio. macOS stops callbacks before it
-/// suspends the process, and its `Instant` excludes sleep; the stall check
-/// catches it instead.
-// TODO(review): see TODO.md, "Sleep on Linux".
+/// stall check never sees the gap. Measured on a clock that counts sleep
+/// (`CheckTime`), a gap between checks of at least the stall bound, during a
+/// recording that began before it, is the same gap in the audio. macOS stops
+/// callbacks before it suspends the process; the stall check catches it.
 fn suspension(
-    last_check_at: Instant,
-    now: Instant,
+    last_check: CheckTime,
+    now: CheckTime,
     recording_since: Option<Instant>,
     stall: Duration,
 ) -> Suspension {
-    let gap = now.saturating_duration_since(last_check_at);
+    let gap = now.since(&last_check);
     if gap < stall {
         Suspension::None
-    } else if recording_since.is_some_and(|since| since <= last_check_at) {
+    } else if recording_since.is_some_and(|since| since <= last_check.instant) {
         Suspension::DuringRecording(gap)
     } else {
         // Idle, or a recording started after wake, before this check.
@@ -210,12 +263,22 @@ fn suspension(
 mod tests {
     use super::*;
 
+    /// A check `with_sleep` into the clock that counts sleep, at `instant`.
+    fn at(instant: Instant, with_sleep: Duration) -> CheckTime {
+        CheckTime {
+            instant,
+            with_sleep,
+        }
+    }
+
     #[test]
     fn a_suspension_fails_only_a_recording_that_spans_it() {
         let stall = Duration::from_secs(5);
         let before = Instant::now();
-        let last_check = before + Duration::from_secs(1);
-        let woke = last_check + Duration::from_secs(100);
+        let t0 = before + Duration::from_secs(1);
+        let last_check = at(t0, Duration::from_secs(1));
+        // Windows: `Instant` counts the sleep.
+        let woke = at(t0 + Duration::from_secs(100), Duration::from_secs(101));
         let gap = Duration::from_secs(100);
 
         assert_eq!(
@@ -228,18 +291,34 @@ mod tests {
         );
         // Started after wake, before this check ran.
         assert_eq!(
-            suspension(last_check, woke, Some(woke), stall),
+            suspension(last_check, woke, Some(woke.instant), stall),
             Suspension::WhileIdle(gap)
+        );
+        // Linux: `Instant` stopped during the sleep; only the other clock
+        // moved.
+        let woke_linux = at(t0 + Duration::from_millis(50), Duration::from_secs(101));
+        assert_eq!(
+            suspension(last_check, woke_linux, Some(before), stall),
+            Suspension::DuringRecording(gap)
         );
         // An ordinary tick.
         assert_eq!(
             suspension(
                 last_check,
-                last_check + Duration::from_millis(50),
+                at(t0 + Duration::from_millis(50), Duration::from_millis(1050)),
                 Some(before),
                 stall
             ),
             Suspension::None
         );
+    }
+
+    #[test]
+    fn the_sleep_clock_advances_with_instant_while_awake() {
+        let a = CheckTime::now();
+        std::thread::sleep(Duration::from_millis(20));
+        let b = CheckTime::now();
+        assert!(b.since(&a) >= Duration::from_millis(20));
+        assert!(b.since(&a) < Duration::from_secs(5));
     }
 }

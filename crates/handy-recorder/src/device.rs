@@ -12,6 +12,7 @@ pub fn list_input_devices() -> Result<Vec<InputDevice>, Error> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct InputDevice {
     /// Pass as `RecorderConfig::device` to open this device. Always present:
     /// the backend's own ID where it has one, otherwise one built from the
@@ -31,6 +32,12 @@ pub struct InputDevice {
     /// a channel picker (`Channels::Only`). `None` where reading it would
     /// open the device (ALSA) or the platform did not say.
     pub channels: Option<u16>,
+    /// Records what another device plays rather than a microphone: a
+    /// PulseAudio (or pipewire-pulse) monitor source, "Monitor of ...". For
+    /// an application to hide, or to offer as system audio. False on macOS
+    /// and Windows, where loopback devices (BlackHole, Stereo Mix) look like
+    /// any other input.
+    pub is_monitor: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
