@@ -10,8 +10,6 @@ use std::{
 use super::engine::{Shared, Timeouts};
 use crate::{Error, ErrorKind};
 
-/// Detects the failures nothing reports: no audio after open, callbacks
-/// stopping, and a delivery thread that stopped making progress.
 pub(super) struct Watchdog {
     opened_at: Instant,
     callbacks: u64,
