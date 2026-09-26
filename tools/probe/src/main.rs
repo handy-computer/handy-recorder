@@ -1798,7 +1798,7 @@ fn probe_bluetooth_handoff(opts: &Opts) -> Result<Outcome, Error> {
     match recover_quietly(device.as_deref()) {
         // A stale stream is the library's failure to report the handoff.
         Ok(r) if stale => Ok(Outcome::Fail(format!(
-            "{first} (the library only logs digital silence; see TODO.md, \"Digital silence\"); \
+            "{first} (the library only logs digital silence); \
              back on this computer: {r}"
         ))),
         Ok(r) => Ok(Outcome::Info(format!(
