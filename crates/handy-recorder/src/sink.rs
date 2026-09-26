@@ -2,22 +2,23 @@
 ///
 /// Called on the delivery thread, never on the real-time audio thread. Rules:
 ///
-/// - **Return promptly.** A slow sink causes dropped audio, which is counted
-///   in `Stopped::dropped_frames`.
-///   A sink that never returns fails the recorder with `SinkStalled`, and the
+/// - **Return promptly.** A slow sink drops audio (`Stopped::dropped_frames`);
+///   one that never returns fails the recorder with `SinkStalled`, and the
 ///   sink is lost.
 /// - **The sink comes back.** `Recorder::stop` returns it, even after a panic.
-/// - **Errors are the application's.** `process_chunk` returns nothing; a
-///   sink records its own errors and the application decides what they mean.
-///   A panic is caught and ends the recording with
-///   `EndReason::SinkPanicked`; the recorder is unaffected. Requires
-///   `panic = "unwind"`.
+/// - **Errors are the application's.** A sink records its own errors. A panic
+///   ends the recording with `EndReason::SinkPanicked` (needs `panic = "unwind"`).
 ///
-/// The first `process_chunk` call of a recording means audio is flowing. An
-/// application that shows a "connecting" state (Bluetooth devices can take
-/// seconds) has its sink signal that moment.
+/// The first `process_chunk` call of a recording means audio is flowing.
 pub trait Sink: Send + 'static {
     fn process_chunk(&mut self, chunk: AudioChunk<'_>);
+}
+
+/// Lets a recorder take `Box<dyn Sink>`.
+impl<S: Sink + ?Sized> Sink for Box<S> {
+    fn process_chunk(&mut self, chunk: AudioChunk<'_>) {
+        (**self).process_chunk(chunk);
+    }
 }
 
 /// Exactly `frames_per_chunk` frames of interleaved audio.
@@ -32,6 +33,15 @@ pub struct AudioChunk<'a> {
     pub valid_frames: usize,
 }
 
+impl AudioChunk<'_> {
+    /// Every real sample is exactly zero. A run of these usually means a muted
+    /// or denied mic, or a headset connected to another device.
+    pub fn is_digital_silence(&self) -> bool {
+        let real = self.valid_frames * self.channels as usize;
+        self.samples[..real].iter().all(|&s| s == 0.0)
+    }
+}
+
 /// Collects a recording's real audio (padding excluded) in memory.
 #[derive(Debug, Default)]
 pub struct CollectingSink {
@@ -40,17 +50,18 @@ pub struct CollectingSink {
 
 impl CollectingSink {
     pub fn new() -> Self {
-        todo!()
+        Self::default()
     }
 
     /// The collected interleaved samples.
     pub fn into_samples(self) -> Vec<f32> {
-        todo!()
+        self.samples
     }
 }
 
 impl Sink for CollectingSink {
     fn process_chunk(&mut self, chunk: AudioChunk<'_>) {
-        todo!()
+        let real = chunk.valid_frames * chunk.channels as usize;
+        self.samples.extend_from_slice(&chunk.samples[..real]);
     }
 }

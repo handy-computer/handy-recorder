@@ -11,10 +11,15 @@ use handy_recorder::{AudioChunk, Error, Recorder, RecorderConfig, Sink};
 
 enum AppEvent {
     Key,
+    /// Stdin closed (Ctrl-D).
+    Quit,
     /// The sink got its first chunk: audio is flowing.
     Ready,
     /// Recorder `id` failed.
-    Failed { id: u64, error: Error },
+    Failed {
+        id: u64,
+        error: Error,
+    },
 }
 
 /// Stands in for a VAD + transcription sink.
@@ -66,6 +71,7 @@ fn main() {
         for _ in std::io::stdin().lock().lines() {
             let _ = keys.send(AppEvent::Key);
         }
+        let _ = keys.send(AppEvent::Quit);
     });
     println!("Enter to talk, Enter to stop. Ctrl-D to quit.");
 
@@ -95,7 +101,10 @@ fn main() {
                     }
                 }
                 let (_, r) = recorder.as_ref().unwrap();
-                match r.start(SpeechSink { events: tx.clone(), frames: 0 }) {
+                match r.start(SpeechSink {
+                    events: tx.clone(),
+                    frames: 0,
+                }) {
                     Ok(()) => {
                         recording = true;
                         println!("connecting...");
@@ -107,6 +116,12 @@ fn main() {
                         recorder = None;
                     }
                 }
+            }
+            AppEvent::Quit => {
+                if recording && let Some((_, r)) = &recorder {
+                    finish(r);
+                }
+                break;
             }
             AppEvent::Ready => println!("listening"),
             AppEvent::Failed { id, error } => {

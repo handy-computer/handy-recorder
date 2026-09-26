@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Install ALSA headers (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev
+      - uses: Swatinem/rust-cache@v2
+      # Formatting.
+      - run: cargo fmt --all --check
+      # The library and the probe, warnings as errors.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The library's tests (tier 1, fake backend). The probe has none; the
+      # hardware tests are #[ignore]d and run by hand.
+      - run: cargo test
+      # The probe builds on every platform, so a hardware session never
+      # starts with a compile error.
+      - run: cargo build -p handy-recorder-probe
+
+  # The PulseAudio host against a real sound server, on Ubuntu 24.04: plain
+  # PulseAudio, and PipeWire's PulseAudio server (pipewire-pulse), which
+  # most current distributions run. The probes that need no hardware, on a
+  # null sink's monitor playing noise, including a virtual source removed
+  # mid-recording (`virtual-disconnect`, which must PASS).
+  sound-server:
+    name: Probes (${{ matrix.server }}, ubuntu-24.04)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - server: pulseaudio
+            packages: pulseaudio
+          - server: pipewire
+            packages: pipewire pipewire-pulse wireplumber dbus
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install ALSA headers and the sound server
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev pulseaudio-utils ${{ matrix.packages }}
+      - uses: Swatinem/rust-cache@v2
+      - run: tools/probe/ci/${{ matrix.server }}.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ matrix.server }}-probe-results
+          path: tools/probe/results/

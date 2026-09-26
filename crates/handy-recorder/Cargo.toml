@@ -6,3 +6,43 @@ description = "Cross-platform microphone capture: exact, ordered, framed audio o
 publish = false
 
 [dependencies]
+# Sample conversion to f32. cpal 0.18 re-exports the same crate; depending on
+# it directly keeps conversion independent of the backend's cpal version.
+dasp_sample = "0.11"
+log = "0.4"
+rtrb = "0.4.0"
+# Pinned so resampled output never changes with a dependency bump. Upgrading
+# is a tracked pre-release item (DESIGN.md, "Before the first release").
+rubato = "=0.16.2"
+
+# CPAL 0.18.2 plus one fix, until a CPAL release has it: a fixed-size
+# PulseAudio record stream's buffer is no longer capped at one fragment,
+# which stalled it on PulseAudio and starved a second stream on one
+# connection under pipewire-pulse (tools/probe/README.md, "Results so far").
+# Branch `pulseaudio-record-max-length` of handy-computer/cpal; only the
+# PulseAudio host differs from 0.18.2. A git dependency rather than a
+# `[patch]`, so that crates depending on this one get the fix too.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+cpal = { git = "https://github.com/handy-computer/cpal", rev = "053b6f6a62d428b65b586f80079ba34d0cbf5fb1" }
+
+# The native PulseAudio host (also serves pipewire-pulse), with ALSA fallback.
+# `pulseaudio` and `futures` (the versions cpal's host uses) watch that the
+# opened source still exists; `libc` reads CLOCK_BOOTTIME.
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { git = "https://github.com/handy-computer/cpal", rev = "053b6f6a62d428b65b586f80079ba34d0cbf5fb1", features = ["pulseaudio"] }
+futures = { version = "0.3", default-features = false, features = ["executor"] }
+libc = "0.2"
+pulseaudio = "0.3"
+
+# Microphone permission status (the privacy settings' registry values). The
+# same crate and version cpal's WASAPI host uses.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = ["Win32_System_Registry"] }
+
+# Microphone permission status (AVCaptureDevice authorization), and finding a
+# Bluetooth headset's output device for `take_headset` (the CoreAudio and
+# CoreFoundation bindings cpal already uses).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat"] }
+objc2-core-audio = { version = "0.3.2", default-features = false, features = ["std", "AudioHardware"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFString"] }

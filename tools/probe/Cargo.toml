@@ -1,0 +1,13 @@
+[package]
+name = "handy-recorder-probe"
+version = "0.0.0"
+edition = "2024"
+description = "Hardware probes for handy-recorder."
+publish = false
+
+[dependencies]
+handy-recorder = { path = "../../crates/handy-recorder" }
+log = "0.4"
+# The raw-stream sleep probe uses CPAL directly, with no watchdog: the
+# library's CPAL (crates/handy-recorder/Cargo.toml), so there is one.
+cpal = { git = "https://github.com/handy-computer/cpal", rev = "053b6f6a62d428b65b586f80079ba34d0cbf5fb1" }
