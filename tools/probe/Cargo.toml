@@ -2,7 +2,7 @@
 name = "handy-recorder-probe"
 version = "0.0.0"
 edition = "2024"
-description = "Scripted manual hardware probes for handy-recorder (DESIGN.md, testing tier 3)."
+description = "Hardware probes for handy-recorder."
 publish = false
 
 [dependencies]
