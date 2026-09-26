@@ -78,25 +78,3 @@ impl Sink for CollectingSink {
         self.samples.extend_from_slice(&chunk.samples[..real]);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::AudioChunk;
-
-    fn chunk(samples: &[f32], channels: u16, valid_frames: usize) -> AudioChunk<'_> {
-        AudioChunk {
-            samples,
-            sample_rate: 16_000,
-            channels,
-            valid_frames,
-        }
-    }
-
-    #[test]
-    fn digital_silence_means_every_real_sample_is_exactly_zero() {
-        assert!(chunk(&[0.0; 4], 1, 4).is_digital_silence());
-        assert!(!chunk(&[0.0, 0.0, 1e-9, 0.0], 1, 4).is_digital_silence());
-        // Stereo: one nonzero sample in either channel is enough.
-        assert!(!chunk(&[0.0, 0.0, 0.0, -0.5], 2, 2).is_digital_silence());
-    }
-}

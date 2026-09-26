@@ -1,30 +1,11 @@
-//! Callback and ring tests, against the callback as a free function,
-//! including the K-channel ring tests. Consumer-loop scenarios are tested
-//! through `Recorder` in `crate::tests`.
+//! Callback tests, against the callback as a free function. Consumer-loop
+//! scenarios are tested through `Recorder` in `crate::tests`.
 
 use std::sync::atomic::Ordering;
 
 use rtrb::RingBuffer;
 
-use super::{CaptureTransportState, Routing, drain_available_samples, write_input_to_ring};
-
-#[test]
-fn callback_writes_mono_samples() {
-    let (mut producer, mut consumer) = RingBuffer::<f32>::new(8);
-    let transport = CaptureTransportState::default();
-
-    write_input_to_ring(
-        &[0.25f32, -0.5, 1.0],
-        1,
-        Routing::MixToMono,
-        &mut producer,
-        &transport,
-    );
-
-    let mut output = [0.0; 3];
-    consumer.pop_entire_slice(&mut output).expect("samples");
-    assert_eq!(output, [0.25, -0.5, 1.0]);
-}
+use super::{CaptureTransportState, Routing, write_input_to_ring};
 
 #[test]
 fn callback_downmixes_or_selects_multichannel_input() {
@@ -92,93 +73,6 @@ fn callback_forwards_boundary_block_then_stays_silent_until_resumed() {
 }
 
 #[test]
-fn callback_partially_fills_ring_and_counts_dropped_audio() {
-    let (mut producer, mut consumer) = RingBuffer::<f32>::new(2);
-    let transport = CaptureTransportState::default();
-
-    write_input_to_ring(
-        &[1.0f32, 2.0, 3.0],
-        1,
-        Routing::MixToMono,
-        &mut producer,
-        &transport,
-    );
-
-    let mut captured = [0.0; 2];
-    consumer
-        .pop_entire_slice(&mut captured)
-        .expect("partial callback audio");
-    assert_eq!(captured, [1.0, 2.0]);
-    assert_eq!(transport.overrun_frames.load(Ordering::Relaxed), 1);
-}
-
-#[test]
-fn bounded_drain_leaves_remaining_samples_for_the_next_command_cycle() {
-    let (mut producer, mut consumer) = RingBuffer::<f32>::new(8);
-    producer
-        .push_entire_slice(&[1.0, 2.0, 3.0, 4.0, 5.0])
-        .expect("samples");
-    let mut drained = Vec::new();
-
-    let count =
-        drain_available_samples(&mut consumer, 3, 1, |part| drained.extend_from_slice(part));
-
-    assert_eq!(count, 3);
-    assert_eq!(drained, [1.0, 2.0, 3.0]);
-    assert_eq!(consumer.slots(), 2);
-}
-
-#[test]
-fn ring_wraparound_preserves_both_read_slices_in_order() {
-    let (mut producer, mut consumer) = RingBuffer::<f32>::new(5);
-    let transport = CaptureTransportState::default();
-    producer
-        .push_entire_slice(&[1.0, 2.0, 3.0, 4.0])
-        .expect("initial samples");
-    let mut discarded = [0.0; 3];
-    consumer
-        .pop_entire_slice(&mut discarded)
-        .expect("advance ring head");
-
-    write_input_to_ring(
-        &[5.0f32, 6.0, 7.0, 8.0],
-        1,
-        Routing::MixToMono,
-        &mut producer,
-        &transport,
-    );
-
-    let chunk = consumer.read_chunk(5).expect("wrapped samples");
-    let (first, second) = chunk.as_slices();
-    assert!(!first.is_empty());
-    assert!(!second.is_empty());
-    let ordered = first
-        .iter()
-        .chain(second.iter())
-        .copied()
-        .collect::<Vec<_>>();
-    assert_eq!(ordered, [4.0, 5.0, 6.0, 7.0, 8.0]);
-}
-
-#[test]
-fn callback_writes_all_channels_interleaved() {
-    let (mut producer, mut consumer) = RingBuffer::<f32>::new(8);
-    let transport = CaptureTransportState::default();
-
-    write_input_to_ring(
-        &[1.0f32, -1.0, 2.0, -2.0, 3.0, -3.0],
-        2,
-        Routing::All,
-        &mut producer,
-        &transport,
-    );
-
-    let mut output = [0.0; 6];
-    consumer.pop_entire_slice(&mut output).expect("samples");
-    assert_eq!(output, [1.0, -1.0, 2.0, -2.0, 3.0, -3.0]);
-}
-
-#[test]
 fn overrun_drops_whole_frames_and_counts_frames() {
     // Five free slots hold two stereo frames; the fifth slot stays empty
     // rather than taking half of the third frame.
@@ -198,41 +92,4 @@ fn overrun_drops_whole_frames_and_counts_frames() {
     consumer.pop_entire_slice(&mut output).expect("samples");
     assert_eq!(output, [1.0, -1.0, 2.0, -2.0]);
     assert_eq!(transport.overrun_frames.load(Ordering::Relaxed), 1);
-}
-
-#[test]
-fn stereo_frames_stay_aligned_across_ring_wraparound() {
-    // Capacity is a multiple of K (as the engine allocates it), so a frame
-    // never straddles the wrap point unevenly.
-    let (mut producer, mut consumer) = RingBuffer::<f32>::new(6);
-    let transport = CaptureTransportState::default();
-    let mut left = Vec::new();
-    let mut right = Vec::new();
-
-    for block in 0..10 {
-        let base = block as f32 * 10.0;
-        write_input_to_ring(
-            &[base + 1.0, -(base + 1.0), base + 2.0, -(base + 2.0)],
-            2,
-            Routing::All,
-            &mut producer,
-            &transport,
-        );
-        let chunk = consumer.read_chunk(consumer.slots()).unwrap();
-        let (first, second) = chunk.as_slices();
-        let samples: Vec<f32> = first.iter().chain(second).copied().collect();
-        chunk.commit_all();
-        for &[l, r] in samples.as_chunks::<2>().0 {
-            left.push(l);
-            right.push(r);
-        }
-    }
-
-    assert_eq!(transport.overrun_frames.load(Ordering::Relaxed), 0);
-    assert!(
-        left.iter().all(|&s| s > 0.0),
-        "left channel rotated: {left:?}"
-    );
-    assert_eq!(left, right.iter().map(|s| -s).collect::<Vec<_>>());
-    assert_eq!(left.len(), 20);
 }

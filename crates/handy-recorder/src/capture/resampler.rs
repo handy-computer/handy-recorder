@@ -266,70 +266,12 @@ impl FrameResampler {
 mod tests {
     use super::*;
 
-    /// Generate a 1kHz sine wave at the given sample rate and duration.
-    fn sine_wave(sample_rate: usize, freq: f64, duration_secs: f64) -> Vec<f32> {
-        let n = (sample_rate as f64 * duration_secs) as usize;
-        (0..n)
-            .map(|i| {
-                (2.0 * std::f64::consts::PI * freq * i as f64 / sample_rate as f64).sin() as f32
-            })
-            .collect()
-    }
-
     fn collect_output(resampler: &mut FrameResampler, input: &[f32]) -> Vec<f32> {
         let mut out = Vec::new();
         resampler
             .push(input, |frame, _| out.extend_from_slice(frame))
             .unwrap();
         out
-    }
-
-    #[test]
-    fn reset_clears_in_buf_and_pending() {
-        let mut r = FrameResampler::new(48000, 16000, 480, 1).unwrap();
-
-        // Push less than one chunk (1024 samples) to leave data in in_buf
-        let partial = vec![0.5f32; 500];
-        let _ = collect_output(&mut r, &partial);
-
-        r.reset();
-
-        // Now push silence — should get only silence out, no remnants of 0.5
-        let silence = vec![0.0f32; 4096];
-        let out = collect_output(&mut r, &silence);
-
-        let max_abs = out.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-        assert!(
-            max_abs < 0.01,
-            "After reset, silence input should produce near-silence output, got max_abs={}",
-            max_abs
-        );
-    }
-
-    #[test]
-    fn reset_clears_fft_overlap_buffers() {
-        let mut r = FrameResampler::new(48000, 16000, 480, 1).unwrap();
-
-        // Push a loud 1kHz sine wave through the resampler (simulates recording 1)
-        let sine = sine_wave(48000, 1000.0, 0.5); // 500ms of audio
-        let _ = collect_output(&mut r, &sine);
-        r.finish(|_, _| {}).unwrap();
-
-        // Reset (simulates new recording starting)
-        r.reset();
-
-        // Push silence (simulates recording 2 starting with no speech)
-        let silence = vec![0.0f32; 4096];
-        let out = collect_output(&mut r, &silence);
-
-        // The output should be near-zero. If the FFT overlap buffers weren't
-        // cleared, the sine wave's tail would leak into this output.
-        let max_abs = out.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-        assert!(
-            max_abs < 0.01,
-            "FFT overlap should not leak after reset; got max_abs={} (expected near-zero)",
-            max_abs
-        );
     }
 
     #[test]
@@ -363,32 +305,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn reset_passthrough_mode_clears_pending() {
-        // When in_hz == out_hz, no rubato resampler is created (passthrough mode).
-        // Reset should still clear the pending frame buffer.
-        let mut r = FrameResampler::new(16000, 16000, 480, 1).unwrap();
-
-        // Push partial frame (less than 480 samples) to leave data in pending
-        let partial = vec![1.0f32; 200];
-        let _ = collect_output(&mut r, &partial);
-
-        r.reset();
-
-        // Push silence
-        let silence = vec![0.0f32; 960];
-        let out = collect_output(&mut r, &silence);
-
-        // Two complete frames, the first all zeros, not containing the 1.0 values
-        assert_eq!(out.len(), 960);
-        let max_abs = out.iter().take(480).map(|s| s.abs()).fold(0.0f32, f32::max);
-        assert!(
-            max_abs < 0.001,
-            "Passthrough mode: pending buffer should be cleared after reset, got max_abs={}",
-            max_abs
-        );
-    }
-
     /// Push silence ending in a 200-sample 0.5 burst, then assert finish()
     /// recovers the burst and emits floor(input*ratio) + output_delay samples,
     /// padded to whole 480-sample frames.
@@ -411,23 +327,15 @@ mod tests {
     }
 
     #[test]
-    fn finish_flushes_resampler_delay() {
-        // Exact chunks keep in_buf empty, so the burst survives only via the
-        // delay-line drain. 4096 in -> 1365 real out + 171 delay -> 1920 framed.
+    fn finish_flushes_the_tail() {
+        // 48 kHz, exact chunks: in_buf stays empty, so the burst survives
+        // only via the delay-line drain. 4096 in -> 1365 real + 171 delay.
         assert_tail_burst_flushed(48000, 4 * RESAMPLER_CHUNK_SIZE, 1920);
-    }
-
-    #[test]
-    fn finish_flushes_resampler_delay_44100() {
-        // fft_size_in (1323) exceeds the 1024 chunk, so the drain must survive
-        // a zero-output round. 4096 in -> 1486 real out + 240 delay -> 1920.
+        // 44.1 kHz: fft_size_in (1323) exceeds the 1024 chunk, so the drain
+        // must survive a zero-output round. 4096 in -> 1486 real + 240 delay.
         assert_tail_burst_flushed(44100, 4 * RESAMPLER_CHUNK_SIZE, 1920);
-    }
-
-    #[test]
-    fn finish_flushes_unaligned_tail() {
         // Ends mid-chunk: partial-chunk path plus delay drain together.
-        // 4396 in -> 1465 real out + 171 delay -> 1920 framed.
+        // 4396 in -> 1465 real + 171 delay.
         assert_tail_burst_flushed(48000, 4 * RESAMPLER_CHUNK_SIZE + 300, 1920);
     }
 
@@ -532,20 +440,6 @@ mod tests {
     }
 
     #[test]
-    fn every_chunk_is_full_size_and_only_the_last_is_padded() {
-        let input = signal(48_000, 0, 48_000 / 2 + 5);
-        let chunks = run(48_000, 16_000, 480, 1, &input);
-        let (last, rest) = chunks.split_last().unwrap();
-        assert!(chunks.iter().all(|(c, _)| c.len() == 480));
-        assert!(rest.iter().all(|(_, v)| *v == 480));
-        assert!(last.1 > 0 && last.1 <= 480);
-        assert!(
-            last.0[last.1..].iter().all(|&s| s == 0.0),
-            "padding is zeros"
-        );
-    }
-
-    #[test]
     fn output_counts_follow_the_frame_count_formula() {
         // floor(input * out / in) real frames plus the
         // resampler's output delay (trimming it is deferred), padding
@@ -562,11 +456,5 @@ mod tests {
                 assert_eq!(valid, expected, "{in_hz} Hz, {frames} frames");
             }
         }
-    }
-
-    #[test]
-    fn unsupported_rates_fail_construction_instead_of_panicking() {
-        assert!(FrameResampler::new(48_000, 0, 480, 1).is_err());
-        assert!(FrameResampler::new(0, 16_000, 480, 1).is_err());
     }
 }

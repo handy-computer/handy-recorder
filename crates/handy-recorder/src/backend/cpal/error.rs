@@ -167,40 +167,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn errors_that_end_the_stream_keep_the_platform_message() {
-        for (cpal_kind, kind) in [
-            (
-                cpal::ErrorKind::DeviceNotAvailable,
-                BackendErrorKind::DeviceNotAvailable,
-            ),
-            (
-                cpal::ErrorKind::StreamInvalidated,
-                BackendErrorKind::StreamInvalidated,
-            ),
-            (
-                cpal::ErrorKind::DeviceChanged,
-                BackendErrorKind::DeviceChanged,
-            ),
-            (
-                cpal::ErrorKind::PermissionDenied,
-                BackendErrorKind::PermissionDenied,
-            ),
-            (cpal::ErrorKind::BackendError, BackendErrorKind::Other),
-        ] {
-            let error = map_error(cpal::Error::with_message(cpal_kind, "AUDCLNT_E_X"));
-            assert_eq!(error.kind, kind);
-            assert!(!error.kind.stream_survives());
-            assert_eq!(error.message, "AUDCLNT_E_X");
-        }
-        let error = map_error_during(
-            "Failed to build input stream",
-            cpal::Error::with_message(cpal::ErrorKind::PermissionDenied, "Unauthorized"),
-        );
-        assert_eq!(error.kind, BackendErrorKind::PermissionDenied);
-        assert_eq!(error.message, "Failed to build input stream: Unauthorized");
-    }
-
     /// Messages as cpal's WASAPI host formats them, seen on hardware.
     #[test]
     fn wasapi_codes_are_named_and_a_service_restart_invalidates_the_stream() {

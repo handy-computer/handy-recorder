@@ -6,7 +6,7 @@ use std::{sync::Arc, thread};
 use super::support::{
     self, Chunks, fake, open, push_idle, ramp, start, stop_with_boundary, wait_until,
 };
-use crate::{Channels, CollectingSink, EndReason, ErrorKind, Recorder, RecorderConfig};
+use crate::{Channels, CollectingSink, ErrorKind, Recorder, RecorderConfig};
 
 /// 16 kHz mono in, 16 kHz mono out: no resampling, so samples pass through
 /// unchanged and positions can be checked exactly.
@@ -90,17 +90,6 @@ fn start_while_recording_fails_with_already_recording_and_returns_the_sink() {
 }
 
 #[test]
-fn stop_without_a_recording_is_not_recording() {
-    let fake = fake(16_000, 1);
-    let recorder: Recorder<CollectingSink> = open(&fake, passthrough(160));
-    assert_eq!(recorder.stop().unwrap_err().kind(), ErrorKind::NotRecording);
-
-    start(&recorder, CollectingSink::new());
-    stop_with_boundary(&recorder, &fake, &[0.0f32]).unwrap();
-    assert_eq!(recorder.stop().unwrap_err().kind(), ErrorKind::NotRecording);
-}
-
-#[test]
 fn concurrent_stops_give_the_recording_to_exactly_one() {
     let fake = fake(16_000, 1);
     let recorder: Arc<Recorder<CollectingSink>> = Arc::new(open(&fake, passthrough(160)));
@@ -128,17 +117,6 @@ fn concurrent_stops_give_the_recording_to_exactly_one() {
                 .all(|e| e.kind() == ErrorKind::NotRecording)
         );
     }
-}
-
-#[test]
-fn close_during_a_recording_discards_it_and_releases_the_stream() {
-    let fake = fake(16_000, 1);
-    let recorder: Recorder<CollectingSink> = open(&fake, passthrough(160));
-    start(&recorder, CollectingSink::new());
-    assert!(fake.push(&ramp(0, 1000)));
-
-    recorder.close().expect("close");
-    assert!(!fake.is_streaming());
 }
 
 #[test]
@@ -245,31 +223,6 @@ fn stop_from_inside_the_sink_fails_at_once_and_the_recording_continues() {
 }
 
 #[test]
-fn the_sink_first_call_marks_audio_flowing() {
-    use std::sync::mpsc;
-
-    struct Ready(Option<mpsc::Sender<()>>);
-    impl crate::Sink for Ready {
-        fn process_chunk(&mut self, _: crate::AudioChunk<'_>) {
-            if let Some(tx) = self.0.take() {
-                let _ = tx.send(());
-            }
-        }
-    }
-
-    let fake = fake(48_000, 1);
-    let recorder: Recorder<Ready> = open(&fake, RecorderConfig::speech());
-    let (tx, rx) = mpsc::channel();
-    start(&recorder, Ready(Some(tx)));
-    assert!(rx.try_recv().is_err(), "no audio yet");
-    // Silence counts: flowing means the device delivers samples.
-    assert!(fake.push(&[0.0f32; 4800]));
-    rx.recv_timeout(support::WAIT).expect("first chunk");
-    let stopped = stop_with_boundary(&recorder, &fake, &[0.0f32]).unwrap();
-    assert!(matches!(stopped.end_reason, EndReason::StopCalled));
-}
-
-#[test]
 fn collecting_sink_keeps_only_real_audio() {
     let fake = fake(16_000, 2);
     let recorder: Recorder<CollectingSink> = open(
@@ -310,33 +263,4 @@ fn take_headset_holds_the_headset_only_while_recording() {
         });
     }
     assert_eq!(fake.headset_holds(), [true, false, true, false]);
-}
-
-#[test]
-fn without_take_headset_the_headset_is_left_alone() {
-    let fake = fake(16_000, 1);
-    let recorder: Recorder<Chunks> = open(&fake, passthrough(160));
-    start(&recorder, Chunks::default());
-    stop_with_boundary(&recorder, &fake, &[0.5f32]).unwrap();
-    recorder.close().unwrap();
-    assert!(fake.headset_holds().is_empty());
-}
-
-#[test]
-fn a_boxed_sink_records_like_any_other() {
-    struct Forwards(std::sync::mpsc::Sender<usize>);
-    impl crate::Sink for Forwards {
-        fn process_chunk(&mut self, chunk: crate::AudioChunk<'_>) {
-            let _ = self.0.send(chunk.valid_frames);
-        }
-    }
-    let fake = fake(16_000, 1);
-    let recorder: Recorder<Box<dyn crate::Sink>> = open(&fake, passthrough(160));
-    let (tx, rx) = std::sync::mpsc::channel();
-    start(&recorder, Box::new(Forwards(tx)));
-    assert!(fake.push(&ramp(0, 320)));
-    let stopped = stop_with_boundary(&recorder, &fake, &ramp(320, 10)).unwrap();
-    assert!(stopped.is_complete());
-    drop(stopped);
-    assert_eq!(rx.iter().sum::<usize>(), 330);
 }

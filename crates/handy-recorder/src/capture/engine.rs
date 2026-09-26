@@ -106,8 +106,6 @@ pub(crate) struct Shared {
     started_at: OnceLock<Instant>,
     /// Advanced by the delivery thread on every loop and drain.
     pub heartbeat: AtomicU64,
-    /// Platform errors the stream survived (xruns, real-time denied).
-    pub survived_errors: AtomicU64,
     /// Xruns since the current recording started: audio the platform lost
     /// before the callback, of unknown length (WASAPI discontinuities, ALSA
     /// overruns, CoreAudio overloads), except one before the stream's first
@@ -130,7 +128,6 @@ impl Shared {
             device: OnceLock::new(),
             started_at: OnceLock::new(),
             heartbeat: AtomicU64::new(0),
-            survived_errors: AtomicU64::new(0),
             xruns: AtomicU64::new(0),
             recording_since: Mutex::new(None),
             watchdog_checked_at: Mutex::new(CheckTime::now()),
@@ -734,10 +731,10 @@ fn open_stream(
     };
     let error_shared = Arc::clone(shared);
     let error = move |error: BackendError| {
-        // May run on the platform audio thread. Survivable errors are only
-        // counted; others go to the device thread, which fails the recorder.
+        // May run on the platform audio thread. Survivable errors are not
+        // fatal (xruns are counted); others go to the device thread, which
+        // fails the recorder.
         if error.kind.stream_survives() {
-            error_shared.survived_errors.fetch_add(1, Ordering::Relaxed);
             // WASAPI flags a discontinuity on a stream's first read, whatever
             // happened, and CPAL passes it on. It arrives before that read's
             // audio with no audio delivered yet, nothing can be missing.

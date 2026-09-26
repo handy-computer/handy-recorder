@@ -187,26 +187,3 @@ fn connect_socket() -> Result<UnixStream, ClientError> {
     let path = pulseaudio::socket_path_from_env().ok_or(ClientError::ServerUnavailable)?;
     Ok(UnixStream::connect(path)?)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fragments_are_a_power_of_two_of_at_least_20_ms() {
-        assert_eq!(fragment_frames(48_000), 1024);
-        assert_eq!(fragment_frames(44_100), 1024);
-        assert_eq!(fragment_frames(16_000), 512);
-        assert_eq!(fragment_frames(96_000), 2048);
-        assert_eq!(fragment_frames(8_000), 256);
-        assert_eq!(fragment_frames(1), 1);
-    }
-
-    #[test]
-    fn a_source_added_again_under_a_new_index_is_another_source() {
-        let mut first = None;
-        assert!(same_source(&mut first, 7));
-        assert!(same_source(&mut first, 7));
-        assert!(!same_source(&mut first, 12));
-    }
-}

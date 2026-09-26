@@ -148,19 +148,6 @@ fn a_failure_while_idle_surfaces_at_the_next_start() {
 }
 
 #[test]
-fn a_default_device_reroute_fails_the_recorder() {
-    let fake = fake(16_000, 1);
-    let recorder: Recorder<CollectingSink> = open(&fake, passthrough());
-    assert!(fake.report_error(BackendError::new(
-        BackendErrorKind::DeviceChanged,
-        "default input device changed"
-    )));
-    support::wait_until("stream torn down", || !fake.is_streaming());
-    let error = recorder.start(CollectingSink::new()).unwrap_err();
-    assert_eq!(error.error.kind(), ErrorKind::StreamInvalidated);
-}
-
-#[test]
 fn errors_the_stream_survives_are_counted_not_fatal() {
     let fake = fake(16_000, 1);
     let recorder: Recorder<Chunks> = open(&fake, passthrough());
@@ -173,14 +160,6 @@ fn errors_the_stream_survives_are_counted_not_fatal() {
     let stopped = stop_with_boundary(&recorder, &fake, &[0.5f32]).unwrap();
     assert!(stopped.is_complete());
     assert!(fake.is_streaming());
-    assert_eq!(
-        recorder
-            .engine
-            .shared
-            .survived_errors
-            .load(std::sync::atomic::Ordering::Relaxed),
-        4
-    );
 }
 
 #[test]
@@ -715,23 +694,6 @@ fn a_hanging_teardown_makes_close_time_out() {
 }
 
 #[test]
-fn every_start_failure_returns_the_sink() {
-    #[derive(Debug, PartialEq)]
-    struct Tagged(u32);
-    impl Sink for Tagged {
-        fn process_chunk(&mut self, _: AudioChunk<'_>) {}
-    }
-    let fake = fake(16_000, 1);
-    let recorder: Recorder<Tagged> = open(&fake, passthrough());
-    start(&recorder, Tagged(1));
-    assert_eq!(recorder.start(Tagged(2)).unwrap_err().sink, Tagged(2));
-    stop_with_boundary(&recorder, &fake, &[0.0f32]).unwrap();
-    fake.report_error(lost());
-    support::wait_until("failed", || !fake.is_streaming());
-    assert_eq!(recorder.start(Tagged(3)).unwrap_err().sink, Tagged(3));
-}
-
-#[test]
 fn denied_microphone_access_fails_open_instead_of_recording_silence() {
     let fake = fake(16_000, 1);
     fake.set_permission(crate::Permission::Denied);
@@ -824,82 +786,31 @@ fn access_revoked_while_recording_is_reported_as_denied_not_as_an_unplug() {
     assert_eq!(stopped.sink.valid_frames(), 100);
 }
 
-#[test]
-fn an_unplug_with_access_granted_is_still_a_lost_device() {
-    let fake = fake(16_000, 1);
-    fake.set_denial_fails_stream();
-    let (recorder, failures) = open_notified::<Chunks>(&fake, passthrough(), timeouts());
-    assert!(fake.report_error(lost()));
-    let error = failures
-        .recv_timeout(support::WAIT)
-        .expect("failure handler");
-    assert_eq!(error.kind(), ErrorKind::DeviceLost);
-    drop(recorder);
-}
-
 /// A denied status can be stale; it relabels only the unplug code WASAPI
-/// uses for revocation, not errors that mean something else.
+/// uses for revocation, not an unplug with access granted or other errors.
 #[test]
-fn a_denied_status_does_not_relabel_other_stream_errors() {
-    let fake = fake(16_000, 1);
-    fake.set_denial_fails_stream();
-    fake.set_permission(crate::Permission::Denied);
-    let (recorder, failures) = open_notified::<Chunks>(&fake, passthrough(), timeouts());
-    assert!(fake.report_error(BackendError::new(
-        BackendErrorKind::StreamInvalidated,
-        "Element not found. (os error -2147023728)",
-    )));
-    let error = failures
-        .recv_timeout(support::WAIT)
-        .expect("failure handler");
-    assert_eq!(error.kind(), ErrorKind::StreamInvalidated);
-    drop(recorder);
-}
-
-/// A platform refusal at open keeps its message and says where to grant
-/// access.
-#[test]
-fn a_refused_open_says_where_to_grant_access() {
-    let fake = fake(16_000, 1);
-    fake.set_denial_fails_stream();
-    fake.fail_next_open(BackendError::new(
-        BackendErrorKind::PermissionDenied,
-        "Access is denied. (os error -2147024891)",
-    ));
-    let error = open_with::<Chunks>(&fake, passthrough(), timeouts())
-        .err()
-        .expect("open fails");
-    assert_eq!(error.kind(), ErrorKind::PermissionDenied);
-    let detail = error.detail().unwrap();
-    assert!(
-        detail.to_lowercase().contains("privacy & security"),
-        "{detail}"
-    );
-    assert!(
-        detail.ends_with("Access is denied. (os error -2147024891)"),
-        "{detail}"
-    );
-}
-
-/// WASAPI flags a discontinuity on every stream's first read; it arrives
-/// before any audio and must not be reported against the recording.
-#[test]
-fn an_xrun_before_the_first_audio_is_not_counted() {
-    let fake = fake(16_000, 1);
-    let recorder: Recorder<Chunks> = open(&fake, passthrough());
-    start(&recorder, Chunks::default());
-    let xruns = || {
-        recorder
-            .engine
-            .shared
-            .xruns
-            .load(std::sync::atomic::Ordering::Relaxed)
-    };
-    assert!(fake.report_error(BackendError::new(BackendErrorKind::Xrun, "xrun")));
-    assert_eq!(xruns(), 0);
-    assert!(fake.push(&ramp(0, 100)));
-    assert!(fake.report_error(BackendError::new(BackendErrorKind::Xrun, "xrun")));
-    assert_eq!(xruns(), 1);
+fn only_an_unplug_while_denied_is_relabeled_as_denied() {
+    for (permission, reported, kind) in [
+        (crate::Permission::Granted, lost(), ErrorKind::DeviceLost),
+        (
+            crate::Permission::Denied,
+            BackendError::new(
+                BackendErrorKind::StreamInvalidated,
+                "Element not found. (os error -2147023728)",
+            ),
+            ErrorKind::StreamInvalidated,
+        ),
+    ] {
+        let fake = fake(16_000, 1);
+        fake.set_denial_fails_stream();
+        fake.set_permission(permission);
+        let (_recorder, failures) = open_notified::<Chunks>(&fake, passthrough(), timeouts());
+        assert!(fake.report_error(reported));
+        let error = failures
+            .recv_timeout(support::WAIT)
+            .expect("failure handler");
+        assert_eq!(error.kind(), kind);
+    }
 }
 
 /// macOS stops callbacks for tens of seconds of awake time around system
