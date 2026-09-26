@@ -25,7 +25,8 @@ impl Error {
         self.0.device.as_ref()
     }
 
-    /// How long the stream had been running. `None` before it started.
+    /// How long the stream had been running. `None` before it started, and
+    /// for misuse errors.
     pub fn elapsed(&self) -> Option<Duration> {
         self.0.elapsed
     }

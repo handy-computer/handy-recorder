@@ -36,7 +36,8 @@ pub enum Permission {
     Granted,
     Denied,
     NotDetermined,
-    /// No answer up front (Linux, unreadable settings); denial surfaces from `open`.
+    /// No answer up front (Linux, or Windows settings that can't be read);
+    /// denial surfaces from `open`.
     Unknown,
 }
 

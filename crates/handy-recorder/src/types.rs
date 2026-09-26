@@ -1,8 +1,8 @@
 use crate::{Error, InputDevice};
 
-/// What the sink receives. The device always runs at its OS format;
-/// `RecorderConfig::default()` opens the default device and delivers its audio
-/// unchanged.
+/// Which device to open and what the sink receives. The device always runs at
+/// its OS format; `RecorderConfig::default()` delivers the default device's
+/// audio unchanged.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RecorderConfig {
     /// An `InputDevice::id` from `list_input_devices`. `None` opens the
@@ -16,7 +16,7 @@ pub struct RecorderConfig {
     /// Frames per `process_chunk` call (one sample per channel). `None` is
     /// about 10 ms; set it when the sink needs a fixed size, like a VAD.
     pub frames_per_chunk: Option<usize>,
-    /// Moves a Bluetooth headset (AirPods) to this device while recording.
+    /// Moves a Bluetooth headset (AirPods) to this Mac while recording.
     /// macOS only.
     pub take_headset: bool,
 }

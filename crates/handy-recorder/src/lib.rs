@@ -6,8 +6,8 @@
 //!
 //! # Concepts
 //!
-//! - A [`Recorder`] warms the selected microphone when opened. After `start`,
-//!   the sink receives the audio.
+//! - A [`Recorder`] is an open microphone; `start` and `stop` bracket each
+//!   recording.
 //! - A [`Sink`] is application code that receives the recording's audio as
 //!   fixed-size [`AudioChunk`]s. It is lent to the library by `start` and
 //!   handed back by `stop`.
@@ -71,10 +71,11 @@ pub struct Recorder<S> {
 
 impl<S: Sink> Recorder<S> {
     /// Opens the device at its OS format. Audio may take seconds to flow
-    /// (Bluetooth); the sink's first chunk signals it, and `NoAudio` if never.
+    /// (Bluetooth); the sink's first chunk marks it. A device that never
+    /// delivers fails with `NoAudio`.
     ///
-    /// Failures surface only at the next `start` or `stop`; prefer
-    /// [`open_with_failure_handler`](Self::open_with_failure_handler).
+    /// Without a failure handler, failures surface only at the next `start` or
+    /// `stop`; prefer [`open_with_failure_handler`](Self::open_with_failure_handler).
     pub fn open(config: RecorderConfig) -> Result<Self, Error> {
         Ok(Self {
             engine: Engine::open(CpalBackend::shared(), config, None, Timeouts::default())?,
@@ -97,7 +98,7 @@ impl<S: Sink> Recorder<S> {
     }
 
     /// What was opened: the device, the format it runs at, and the format
-    /// the sink receives. Can be called once `open` returns.
+    /// the sink receives.
     pub fn info(&self) -> &RecorderInfo {
         self.engine.info()
     }
@@ -112,8 +113,8 @@ impl<S: Sink> Recorder<S> {
     /// panic; `end_reason` says what ended it. A recording that ended on its
     /// own still needs this `stop` before the next `start`.
     ///
-    /// Errors: `NotRecording`, `SinkStalled` (the sink is lost), or
-    /// `StopFromSink` (called from inside the sink; the recording continues).
+    /// Errors: `NotRecording`, `StopFromSink` (the recording continues), or the
+    /// sink is lost (usually `SinkStalled`).
     pub fn stop(&self) -> Result<Stopped<S>, Error> {
         self.engine.stop()
     }

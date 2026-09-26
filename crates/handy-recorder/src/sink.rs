@@ -3,7 +3,8 @@
 /// Called on the delivery thread, never on the real-time audio thread. Rules:
 ///
 /// - **Return promptly.** A slow sink drops audio (`Stopped::dropped_frames`);
-///   one that never returns fails the recorder with `SinkStalled`.
+///   one that never returns fails the recorder with `SinkStalled`, and the
+///   sink is lost.
 /// - **The sink comes back.** `Recorder::stop` returns it, even after a panic.
 /// - **Errors are the application's.** A sink records its own errors. A panic
 ///   ends the recording with `EndReason::SinkPanicked` (needs `panic = "unwind"`).
