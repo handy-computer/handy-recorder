@@ -36,16 +36,19 @@ one PulseAudio fix, commit `053b6f6` of branch
 ### Device enumeration on every open
 
 `open` lists input devices to find a device by ID, and, for the default
-device, to report which device it opened. Measured on macOS: about
-1.4 ms warm, 99 ms for the first enumeration in a process (CoreAudio
-warming up). Windows: 2.5-7 ms, the first open included, with two
-devices (the `resolve_device=` debug line). Not measured on Linux; unless
-it is much slower there, the cost does not matter. There is no constant-time
-lookup through CPAL 0.18: `device_by_id` enumerates on every host. The
-platforms can look up directly (CoreAudio translates a UID to a device;
-WASAPI `IMMDeviceEnumerator::GetDevice`; PulseAudio source info by
-name), so an upstream CPAL change could add it. IDs synthesized as
-`name#occurrence` (the platform gave none) can only be found by
-enumerating.
+device, to report which device it opened. Measured on macOS: about 1.4
+ms warm, 99 ms for the first enumeration in a process (CoreAudio warming
+up). Windows: 2.5-7 ms, the first open included, with two devices (the
+`resolve_device=` debug line). Linux (Fedora, PipeWire 1.4): about 12 ms
+(6-20) on PulseAudio with 6 inputs, connecting to the server included,
+of a 43 ms open; about 17 ms (11-26) on ALSA with 13 inputs, of a 33 ms
+open. `list_input_devices` takes about 10 ms on either. Slower than
+macOS and Windows, but once per open the cost does not matter. There is
+no constant-time lookup through CPAL 0.18: `device_by_id` enumerates on
+every host. The platforms can look up directly (CoreAudio translates a
+UID to a device; WASAPI `IMMDeviceEnumerator::GetDevice`; PulseAudio
+source info by name), so an upstream CPAL change could add it. IDs
+synthesized as `name#occurrence` (the platform gave none) can only be
+found by enumerating.
 
 Location: `backend/cpal/mod.rs`, `open_device`.
