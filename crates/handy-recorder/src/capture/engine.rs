@@ -3,8 +3,8 @@
 //!
 //! Threads per open recorder:
 //! - device thread: creates, owns, and drops the platform stream; runs the
-//!   watchdog; turns stream errors into failures. Never runs application
-//!   code, so it can always close the stream.
+//!   watchdog (`watchdog.rs`); turns stream errors into failures. Never runs
+//!   application code, so it can always close the stream.
 //! - delivery thread (`delivery.rs`): drains the ring and runs the sink.
 //! - notification thread: short-lived, calls the failure handler once.
 
@@ -23,6 +23,7 @@ use rtrb::RingBuffer;
 use super::FrameResampler;
 use super::delivery::{self, DeliveryCmd, DeliveryPipeline};
 use super::transport::{CaptureTransportState, Routing, write_input_to_ring};
+use super::watchdog::{self, Watchdog};
 use crate::backend::{Backend, BackendError, BackendErrorKind, InputData, InputStream};
 use crate::{
     Channels, Error, ErrorKind, Format, InputDevice, Permission, RecorderConfig, RecorderInfo,
@@ -134,6 +135,10 @@ impl Shared {
             watchdog_checked_at: Mutex::new(Instant::now()),
             device_tx,
         }
+    }
+
+    pub(super) fn recording_since(&self) -> Option<Instant> {
+        *self.recording_since.lock().unwrap()
     }
 
     pub fn failure(&self) -> Option<Error> {
@@ -422,25 +427,7 @@ impl<S: Sink> Engine<S> {
             }
             *slot = Slot::Stopping;
         }
-        // On wake, callbacks can resume before the watchdog's next check;
-        // without this, a stop in that window would pass the handshake and
-        // return the recording as complete, gap and all. Skipped once the
-        // recorder has failed: the watchdog stops checking then, so the gap
-        // since its last check is not a suspension.
-        let recording_since = *self.shared.recording_since.lock().unwrap();
-        if self.shared.failure().is_none() {
-            let checked_at = self.shared.watchdog_checked_at.lock().unwrap();
-            if let Suspension::DuringRecording(gap) = suspension(
-                *checked_at,
-                Instant::now(),
-                recording_since,
-                self.timeouts.stall,
-            ) {
-                let error = suspended_during_recording(&self.shared, gap, self.timeouts.stall);
-                log::warn!("{error}");
-                self.shared.fail(error);
-            }
-        }
+        watchdog::fail_if_suspended(&self.shared, &self.timeouts);
         let result = self.collect();
         if self.take_headset {
             let _ = self.shared.device_tx.send(DeviceMsg::HoldHeadset(false));
@@ -620,8 +607,13 @@ fn runtime_error(backend: &dyn Backend, shared: &Shared, error: BackendError) ->
         _ => ErrorKind::Backend,
     };
     // Revoking access fails a WASAPI stream with the same code as an unplug
-    // (AUDCLNT_E_DEVICE_INVALIDATED, measured on Windows 11)
-    let kind = if backend.permission_status() == Permission::Denied {
+    // (AUDCLNT_E_DEVICE_INVALIDATED, measured on Windows 11). Only that case
+    // is relabeled: the status can be stale, and every other kind means what
+    // it says.
+    let kind = if kind == ErrorKind::DeviceLost
+        && !backend.denial_is_silent()
+        && backend.permission_status() == Permission::Denied
+    {
         ErrorKind::PermissionDenied
     } else {
         kind
@@ -794,11 +786,7 @@ fn run_device(
     mut handler: Option<Handler>,
 ) {
     let mut stream = Some(stream);
-    let now = Instant::now();
-    // Opening took a while before the watchdog existed; that is not a
-    // suspension.
-    *shared.watchdog_checked_at.lock().unwrap() = now;
-    let mut watchdog = Watchdog::new(now);
+    let mut watchdog = Watchdog::new(&shared);
     loop {
         match device_rx.recv_timeout(timeouts.watchdog_tick) {
             Ok(DeviceMsg::StreamError(error)) => {
@@ -857,216 +845,5 @@ fn notify(handler: Handler, error: Error) {
         });
     if let Err(e) = spawned {
         log::error!("cannot spawn the failure notification thread: {e}");
-    }
-}
-
-/// Detects the failures nothing reports: no audio after open, callbacks
-/// stopping, and a delivery thread that stopped making progress.
-struct Watchdog {
-    opened_at: Instant,
-    callbacks: u64,
-    last_callback_at: Instant,
-    heartbeat: u64,
-    last_heartbeat_at: Instant,
-    /// An idle stall was logged and not yet resolved.
-    idle_stall_logged: bool,
-}
-
-impl Watchdog {
-    fn new(now: Instant) -> Self {
-        Self {
-            opened_at: now,
-            callbacks: 0,
-            last_callback_at: now,
-            heartbeat: 0,
-            last_heartbeat_at: now,
-            idle_stall_logged: false,
-        }
-    }
-
-    fn check(&mut self, shared: &Shared, timeouts: &Timeouts) {
-        let now = Instant::now();
-        let recording_since = *shared.recording_since.lock().unwrap();
-        let suspended = {
-            let mut checked_at = shared.watchdog_checked_at.lock().unwrap();
-            let suspended = suspension(*checked_at, now, recording_since, timeouts.stall);
-            *checked_at = now;
-            // Failed under the lock: `stop` reads the same timestamp.
-            if let Suspension::DuringRecording(gap) = suspended {
-                let error = suspended_during_recording(shared, gap, timeouts.stall);
-                log::warn!("watchdog tripped: {error}");
-                shared.fail(error);
-            }
-            suspended
-        };
-        if let Suspension::WhileIdle(gap) = suspended {
-            // Every thread of the process was frozen, so the gap is evidence
-            // of nothing: it must not count toward `NoAudio`, `SinkStalled`,
-            // or an idle stall.
-            log::info!(
-                "the process was suspended for {:.1} s while idle (system sleep?)",
-                gap.as_secs_f64()
-            );
-            self.opened_at += gap;
-            self.last_callback_at += gap;
-            self.last_heartbeat_at += gap;
-        }
-        let callbacks = shared.transport.callbacks.load(Ordering::Relaxed);
-        if callbacks != self.callbacks {
-            if self.idle_stall_logged {
-                self.idle_stall_logged = false;
-                log::info!(
-                    "audio callbacks resumed after {:.1} s",
-                    (now - self.last_callback_at).as_secs_f64()
-                );
-            }
-            self.callbacks = callbacks;
-            self.last_callback_at = now;
-        }
-        let heartbeat = shared.heartbeat.load(Ordering::Relaxed);
-        if heartbeat != self.heartbeat {
-            self.heartbeat = heartbeat;
-            self.last_heartbeat_at = now;
-        }
-
-        if matches!(suspended, Suspension::DuringRecording(_)) {
-            return;
-        }
-        let error = if callbacks == 0 {
-            let waited = now - self.opened_at;
-            (waited >= timeouts.no_audio).then(|| {
-                shared.error(ErrorKind::NoAudio).with_detail(format!(
-                    "no audio {:.1} s after the stream started (bound {:.1} s)",
-                    waited.as_secs_f64(),
-                    timeouts.no_audio.as_secs_f64()
-                ))
-            })
-        } else {
-            // macOS stops callbacks for tens of seconds of awake time around
-            // system sleep and resumes them after wake, so a stall while idle
-            // is not a failure. During a recording it is: the audio has a gap
-            // of unknown length. Silence counts from the later of the last
-            // callback and the recording's start, so a recording started
-            // just after wake gets the full bound for audio to resume.
-            match recording_since {
-                Some(since) => {
-                    let silent = now - self.last_callback_at.max(since);
-                    (silent >= timeouts.stall).then(|| {
-                        shared.error(ErrorKind::Stalled).with_detail(format!(
-                            "no audio callback for {:.1} s during a recording, after {callbacks} callbacks (bound {:.1} s)",
-                            silent.as_secs_f64(),
-                            timeouts.stall.as_secs_f64()
-                        ))
-                    })
-                }
-                None => {
-                    let silent = now - self.last_callback_at;
-                    if silent >= timeouts.stall && !self.idle_stall_logged {
-                        self.idle_stall_logged = true;
-                        log::info!(
-                            "no audio callbacks for {:.1} s while idle (system sleep?); \
-                             not a failure unless it lasts into a recording",
-                            silent.as_secs_f64()
-                        );
-                    }
-                    None
-                }
-            }
-        };
-        let error = error.or_else(|| {
-            let stuck = now - self.last_heartbeat_at;
-            (stuck >= timeouts.heartbeat).then(|| {
-                shared.error(ErrorKind::SinkStalled).with_detail(format!(
-                    "the delivery thread made no progress for {:.1} s (bound {:.1} s)",
-                    stuck.as_secs_f64(),
-                    timeouts.heartbeat.as_secs_f64()
-                ))
-            })
-        });
-        if let Some(error) = error {
-            log::warn!("watchdog tripped: {error}");
-            shared.fail(error);
-        }
-    }
-}
-
-fn suspended_during_recording(shared: &Shared, gap: Duration, stall: Duration) -> Error {
-    shared.error(ErrorKind::Stalled).with_detail(format!(
-        "the process was suspended for {:.1} s during a recording (system sleep?), \
-         so the audio has a gap (bound {:.1} s)",
-        gap.as_secs_f64(),
-        stall.as_secs_f64()
-    ))
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum Suspension {
-    None,
-    WhileIdle(Duration),
-    DuringRecording(Duration),
-}
-
-/// Whether the watchdog's thread was frozen since its last check, and so the
-/// whole process with it. Windows (Modern Standby) suspends the process
-/// during sleep: callbacks and the watchdog stop together and resume
-/// together, so on wake a callback can arrive before the next check and the
-/// stall check never sees the gap. `Instant` counts sleep there, so a gap
-/// between checks of at least the stall bound, during a recording that began
-/// before it, is the same gap in the audio. macOS stops callbacks before it
-/// suspends the process, and its `Instant` excludes sleep; the stall check
-/// catches it instead.
-// TODO(review): see TODO.md, "Sleep on Linux".
-fn suspension(
-    last_check_at: Instant,
-    now: Instant,
-    recording_since: Option<Instant>,
-    stall: Duration,
-) -> Suspension {
-    let gap = now.saturating_duration_since(last_check_at);
-    if gap < stall {
-        Suspension::None
-    } else if recording_since.is_some_and(|since| since <= last_check_at) {
-        Suspension::DuringRecording(gap)
-    } else {
-        // Idle, or a recording started after wake, before this check.
-        Suspension::WhileIdle(gap)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_suspension_fails_only_a_recording_that_spans_it() {
-        let stall = Duration::from_secs(5);
-        let before = Instant::now();
-        let last_check = before + Duration::from_secs(1);
-        let woke = last_check + Duration::from_secs(100);
-        let gap = Duration::from_secs(100);
-
-        assert_eq!(
-            suspension(last_check, woke, Some(before), stall),
-            Suspension::DuringRecording(gap)
-        );
-        assert_eq!(
-            suspension(last_check, woke, None, stall),
-            Suspension::WhileIdle(gap)
-        );
-        // Started after wake, before this check ran.
-        assert_eq!(
-            suspension(last_check, woke, Some(woke), stall),
-            Suspension::WhileIdle(gap)
-        );
-        // An ordinary tick.
-        assert_eq!(
-            suspension(
-                last_check,
-                last_check + Duration::from_millis(50),
-                Some(before),
-                stall
-            ),
-            Suspension::None
-        );
     }
 }

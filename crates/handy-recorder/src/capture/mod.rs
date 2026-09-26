@@ -12,6 +12,7 @@ pub(crate) mod delivery;
 pub(crate) mod engine;
 mod resampler;
 pub(crate) mod transport;
+mod watchdog;
 
 pub(crate) use resampler::FrameResampler;
 

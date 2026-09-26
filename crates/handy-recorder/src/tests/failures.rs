@@ -739,6 +739,25 @@ fn an_unplug_with_access_granted_is_still_a_lost_device() {
     drop(recorder);
 }
 
+/// A denied status can be stale; it relabels only the unplug code WASAPI
+/// uses for revocation, not errors that mean something else.
+#[test]
+fn a_denied_status_does_not_relabel_other_stream_errors() {
+    let fake = fake(16_000, 1);
+    fake.set_denial_fails_stream();
+    fake.set_permission(crate::Permission::Denied);
+    let (recorder, failures) = open_notified::<Chunks>(&fake, passthrough(), timeouts());
+    assert!(fake.report_error(BackendError::new(
+        BackendErrorKind::StreamInvalidated,
+        "Element not found. (os error -2147023728)",
+    )));
+    let error = failures
+        .recv_timeout(support::WAIT)
+        .expect("failure handler");
+    assert_eq!(error.kind(), ErrorKind::StreamInvalidated);
+    drop(recorder);
+}
+
 /// A platform refusal at open keeps its message and says where to grant
 /// access.
 #[test]

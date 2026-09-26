@@ -25,8 +25,8 @@ pub(crate) fn permission_status() -> Permission {
 /// desktop app; access is on or off. Each switch is a registry value,
 /// "Allow" or "Deny", and turning off any of the three makes WASAPI refuse
 /// a desktop app's stream (measured on Windows 11). Only switches known to
-/// do that are read, because `open` fails on `Denied` without trying the
-/// device.
+/// do that are read: `Denied` turns a lost device into `PermissionDenied`
+/// (see `runtime_error`), and applications act on it.
 #[cfg(target_os = "windows")]
 pub(crate) fn permission_status() -> Permission {
     use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
