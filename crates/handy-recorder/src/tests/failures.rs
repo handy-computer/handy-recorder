@@ -541,6 +541,59 @@ fn the_failure_handler_is_called_once_even_when_it_panics() {
     recorder.close().unwrap();
 }
 
+/// A backend panic on the device thread takes the watchdog with it, so the
+/// recorder must fail at once rather than look healthy until `stop`.
+#[test]
+fn a_panic_on_the_device_thread_fails_the_recorder_and_notifies() {
+    let fake = fake(16_000, 1);
+    let (recorder, failures) = open_notified::<Chunks>(&fake, passthrough(), timeouts());
+    start(&recorder, Chunks::default());
+    assert!(fake.push(&ramp(0, 1000)));
+    fake.panic_in_check_device();
+
+    let error = failures
+        .recv_timeout(support::WAIT)
+        .expect("failure handler");
+    assert_eq!(error.kind(), ErrorKind::Processing);
+    assert_eq!(
+        error.detail(),
+        Some("the device thread panicked: fake backend bug")
+    );
+    support::wait_until("stream torn down", || !fake.is_streaming());
+
+    let stopped = recorder.stop().expect("stop keeps the audio");
+    assert_eq!(
+        recorder_failed(&stopped.end_reason).kind(),
+        ErrorKind::Processing
+    );
+    assert_eq!(stopped.sink.real(), ramp(0, 1000));
+    recorder.close().unwrap();
+}
+
+/// A library panic on the delivery thread is `Processing`, reported at
+/// once, not `SinkStalled` once the heartbeat notices.
+#[test]
+fn a_panic_on_the_delivery_thread_outside_the_sink_is_not_blamed_on_the_sink() {
+    let fake = fake(16_000, 1);
+    let (recorder, failures) = open_notified::<Chunks>(&fake, passthrough(), timeouts());
+    start(&recorder, Chunks::default());
+    support::transport(&recorder)
+        .panic_delivery
+        .store(true, Ordering::Release);
+
+    let error = failures
+        .recv_timeout(support::WAIT)
+        .expect("failure handler");
+    assert_eq!(error.kind(), ErrorKind::Processing);
+    assert_eq!(
+        error.detail(),
+        Some("the delivery thread panicked: injected delivery thread panic")
+    );
+    support::wait_until("stream torn down", || !fake.is_streaming());
+    assert_eq!(recorder.stop().unwrap_err().kind(), ErrorKind::Processing);
+    recorder.close().unwrap();
+}
+
 #[test]
 fn the_failure_handler_can_stop_and_close_the_recorder() {
     let fake = fake(16_000, 1);

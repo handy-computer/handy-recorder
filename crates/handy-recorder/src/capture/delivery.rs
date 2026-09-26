@@ -49,7 +49,7 @@ pub(crate) struct DeliveryPipeline {
 
 pub(crate) fn run<S: Sink>(
     pipeline: DeliveryPipeline,
-    shared: Arc<Shared>,
+    shared: &Arc<Shared>,
     cmd_rx: mpsc::Receiver<DeliveryCmd<S>>,
 ) {
     let DeliveryPipeline {
@@ -63,7 +63,7 @@ pub(crate) fn run<S: Sink>(
     let max_drain_samples =
         ((in_sample_rate as u128 * MAX_DRAIN_CHUNK.as_millis()) / 1_000).max(1) as usize * channels;
     let mut processor = Processor {
-        shared,
+        shared: Arc::clone(shared),
         resampler,
         channels,
         in_sample_rate,
@@ -77,6 +77,15 @@ pub(crate) fn run<S: Sink>(
 
     loop {
         processor.beat();
+        #[cfg(test)]
+        if processor
+            .shared
+            .transport
+            .panic_delivery
+            .swap(false, Ordering::AcqRel)
+        {
+            panic!("injected delivery thread panic");
+        }
         // Avoid sleeping with queued audio; check commands before each bounded
         // drain so Stop cannot sit behind a multi-second backlog.
         let mut command = if consumer.slots() > 0 {
@@ -374,6 +383,9 @@ impl<S: Sink> Processor<S> {
 
     /// Ends the recording and hands it back. `None` if there is none.
     fn stop(&mut self, consumer: &mut Consumer<f32>) -> Option<Stopped<S>> {
+        // `stop` sends Stop only for a started recording. Without one, the
+        // dropped reply would be misreported as the delivery thread exiting.
+        debug_assert!(self.active.is_some(), "Stop without a recording");
         self.active.as_ref()?;
         if self.capturing() {
             let overrun = self
@@ -521,7 +533,7 @@ fn deliver<S: Sink>(active: &mut Active<S>, samples: &[f32], valid: usize, forma
     }
 }
 
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+pub(super) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_owned()
     } else if let Some(s) = payload.downcast_ref::<String>() {

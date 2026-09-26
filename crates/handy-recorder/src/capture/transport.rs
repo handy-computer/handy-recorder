@@ -32,6 +32,10 @@ pub(crate) struct CaptureTransportState {
     /// ring), so a test can wait until idle audio has been discarded.
     #[cfg(test)]
     pub frames_drained: std::sync::atomic::AtomicUsize,
+    /// Test-only: makes the delivery thread panic outside the sink, as a
+    /// library bug would.
+    #[cfg(test)]
+    pub panic_delivery: AtomicBool,
 }
 
 /// Which device channels reach the ring. Resolved and validated at open.

@@ -43,6 +43,8 @@ struct State {
     /// The device is gone, but the stream keeps running (PulseAudio moves
     /// it to another source): `check_device` reports it.
     removed: bool,
+    /// `check_device` panics, as a backend bug would.
+    check_panics: bool,
 }
 
 /// Holds a platform call until opened, like a driver that hangs.
@@ -140,6 +142,11 @@ impl FakeBackend {
         self.shared.state.lock().unwrap().removed = true;
     }
 
+    /// Makes `check_device` panic.
+    pub fn panic_in_check_device(&self) {
+        self.shared.state.lock().unwrap().check_panics = true;
+    }
+
     pub fn is_streaming(&self) -> bool {
         self.shared.state.lock().unwrap().stream.is_some()
     }
@@ -222,7 +229,15 @@ impl InputStream for FakeStream {
     }
 
     fn check_device(&mut self) -> Result<(), BackendError> {
-        if self.0.shared.state.lock().unwrap().removed {
+        // Read, then panic, so the panic does not poison the fake's state.
+        let (removed, panics) = {
+            let state = self.0.shared.state.lock().unwrap();
+            (state.removed, state.check_panics)
+        };
+        if panics {
+            panic!("fake backend bug");
+        }
+        if removed {
             return Err(BackendError::new(
                 BackendErrorKind::DeviceNotAvailable,
                 "the fake device was removed",

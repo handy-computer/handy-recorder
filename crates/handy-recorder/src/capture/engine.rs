@@ -9,6 +9,7 @@
 //! - notification thread: short-lived, calls the failure handler once.
 
 use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -21,7 +22,7 @@ use std::{
 use rtrb::RingBuffer;
 
 use super::FrameResampler;
-use super::delivery::{self, DeliveryCmd, DeliveryPipeline};
+use super::delivery::{self, DeliveryCmd, DeliveryPipeline, panic_message};
 use super::transport::{CaptureTransportState, Routing, write_input_to_ring};
 use super::watchdog::{self, CheckTime, Watchdog};
 use crate::backend::{Backend, BackendError, BackendErrorKind, InputData, InputStream};
@@ -321,7 +322,16 @@ impl<S: Sink> Engine<S> {
                 .name("handy-recorder-delivery".into())
                 .spawn(move || {
                     let _exit = delivery_exit_tx;
-                    delivery::run(pipeline, shared, delivery_rx);
+                    // Sink panics are caught per chunk, so a panic here is
+                    // the library's, or a sink's `Drop`. Fail now, rather
+                    // than let the heartbeat report it later as a stall.
+                    let run = AssertUnwindSafe(|| delivery::run(pipeline, &shared, delivery_rx));
+                    if let Err(payload) = catch_unwind(run) {
+                        let error = shared.fail(shared.error(ErrorKind::Processing).with_detail(
+                            format!("the delivery thread panicked: {}", panic_message(&*payload)),
+                        ));
+                        log::error!("recorder failed: {error}");
+                    }
                 })
         };
         let delivery = match delivery {
@@ -786,12 +796,50 @@ fn run_device(
     mut handler: Option<Handler>,
 ) {
     let mut stream = Some(stream);
-    let mut watchdog = Watchdog::new(&shared);
+    let supervise = AssertUnwindSafe(|| {
+        supervise(
+            backend,
+            &mut stream,
+            &shared,
+            &device_rx,
+            &timeouts,
+            &mut handler,
+        )
+    });
+    let Err(payload) = catch_unwind(supervise) else {
+        return;
+    };
+    // A panic in the backend or the watchdog is the library's. Without the
+    // watchdog nothing would notice the recorder is dead, so fail it,
+    // release the stream, and notify, as for any other failure.
+    let error = shared.fail(shared.error(ErrorKind::Processing).with_detail(format!(
+        "the device thread panicked: {}",
+        panic_message(&*payload)
+    )));
+    log::error!("recorder failed: {error}");
+    if catch_unwind(AssertUnwindSafe(|| teardown(&mut stream))).is_err() {
+        log::error!("releasing the stream panicked");
+    }
+    if let Some(handler) = handler.take() {
+        notify(handler, error);
+    }
+}
+
+/// The device thread's loop, until close.
+fn supervise(
+    backend: &dyn Backend,
+    stream: &mut Option<Box<dyn InputStream>>,
+    shared: &Shared,
+    device_rx: &mpsc::Receiver<DeviceMsg>,
+    timeouts: &Timeouts,
+    handler: &mut Option<Handler>,
+) {
+    let mut watchdog = Watchdog::new(shared);
     loop {
         match device_rx.recv_timeout(timeouts.watchdog_tick) {
             Ok(DeviceMsg::StreamError(error)) => {
                 if stream.is_some() {
-                    let error = runtime_error(backend, &shared, error);
+                    let error = runtime_error(backend, shared, error);
                     shared.fail(error);
                 }
             }
@@ -802,27 +850,27 @@ fn run_device(
             }
             Ok(DeviceMsg::Failed) | Err(mpsc::RecvTimeoutError::Timeout) => {}
             Ok(DeviceMsg::Close) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                teardown(&mut stream);
+                teardown(stream);
                 return;
             }
         }
 
         if stream.is_some() && shared.failure.get().is_none() {
-            watchdog.check(&shared, &timeouts);
+            watchdog.check(shared, timeouts);
         }
 
         if let Some(open) = stream.as_mut()
             && shared.failure.get().is_none()
             && let Err(error) = open.check_device()
         {
-            shared.fail(runtime_error(backend, &shared, error));
+            shared.fail(runtime_error(backend, shared, error));
         }
 
         if let Some(error) = shared.failure()
             && stream.is_some()
         {
             log::error!("recorder failed: {error}");
-            teardown(&mut stream);
+            teardown(stream);
             if let Some(handler) = handler.take() {
                 notify(handler, error);
             }
@@ -844,8 +892,7 @@ fn notify(handler: Handler, error: Error) {
     let spawned = thread::Builder::new()
         .name("handy-recorder-notify".into())
         .spawn(move || {
-            let result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || handler(error)));
+            let result = catch_unwind(AssertUnwindSafe(move || handler(error)));
             if result.is_err() {
                 log::error!("the failure handler panicked");
             }
