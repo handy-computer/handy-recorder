@@ -30,6 +30,8 @@ await recorder.close();
 
 Prebuilt for macOS (arm64, x64; 11+), Windows (x64, arm64), and Linux glibc 2.35+ (x64, arm64: Ubuntu 22.04+, Debian 12+). There are no install scripts. On Linux it uses PulseAudio or PipeWire when running, with ALSA as the fallback. Linux musl (Alpine) isn't built yet.
 
+On Linux the addon needs the ALSA library (`libasound.so.2`) to load, even when it records through PulseAudio or PipeWire. Desktop distributions have it; minimal and container images may not (Debian/Ubuntu: `libasound2`, Fedora: `alsa-lib`). Without it, importing the package throws an error that says so.
+
 ## Developing
 
 Needs Rust and Node 18+.
