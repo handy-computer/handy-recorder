@@ -9,7 +9,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use handy_recorder::Permission;
 use handy_recorder::testing::{FakeError, FakeMic as CoreFakeMic, Held};
@@ -94,7 +94,7 @@ impl FakeMic {
     }
 
     /// Starts feeding the ramp in blocks of `block_frames`, one every
-    /// `interval_ms`, from a thread of its own.
+    /// `interval_ms` on average, from a thread of its own.
     #[napi]
     pub fn start_feeding(&self, block_frames: u32, interval_ms: u32) -> Result<()> {
         self.stop_feeding();
@@ -107,16 +107,29 @@ impl FakeMic {
             .name("fake-mic-feeder".into())
             .spawn(move || {
                 let frames = block_frames as usize;
+                let interval = Duration::from_millis(u64::from(interval_ms));
                 let mut block = vec![0.0f32; frames * channels];
+                // Paced by the clock, not by sleeps, which overshoot on a
+                // loaded machine: a late wake delivers the blocks it owes, as
+                // a real device's callback catches up.
+                let started = Instant::now();
+                let mut blocks: u32 = 0;
                 while !stopping.load(Ordering::Relaxed) {
-                    let first = fed.load(Ordering::Relaxed);
-                    for (i, frame) in block.chunks_mut(channels).enumerate() {
-                        frame.fill(((first + i as u64) % RAMP) as f32 / RAMP as f32);
+                    let due =
+                        (started.elapsed().as_nanos() / interval.as_nanos().max(1)) as u32 + 1;
+                    while blocks < due {
+                        let first = fed.load(Ordering::Relaxed);
+                        for (i, frame) in block.chunks_mut(channels).enumerate() {
+                            frame.fill(((first + i as u64) % RAMP) as f32 / RAMP as f32);
+                        }
+                        if mic.push(&block) {
+                            fed.fetch_add(frames as u64, Ordering::Relaxed);
+                        }
+                        blocks += 1;
                     }
-                    if mic.push(&block) {
-                        fed.fetch_add(frames as u64, Ordering::Relaxed);
-                    }
-                    thread::sleep(Duration::from_millis(u64::from(interval_ms)));
+                    thread::sleep(
+                        (started + interval * blocks).saturating_duration_since(Instant::now()),
+                    );
                 }
             })
             .map_err(|e| NapiError::from_reason(e.to_string()))?;

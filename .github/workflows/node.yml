@@ -51,8 +51,8 @@ jobs:
       - run: node test/run.mjs --runtime bun
       - run: node test/run.mjs --runtime "deno run -A"
 
-  # The published binaries, one per target. Linux builds in Debian 11
-  # (glibc 2.31), so the binary loads on distributions that old and newer.
+  # The published binaries, one per target. Linux builds in Ubuntu 22.04
+  # (glibc 2.35), so the binary loads there, on Debian 12, and newer.
   build:
     name: Build ${{ matrix.target }}
     strategy:
@@ -63,8 +63,8 @@ jobs:
           - { target: x86_64-apple-darwin, os: macos-latest }
           - { target: x86_64-pc-windows-msvc, os: windows-latest }
           - { target: aarch64-pc-windows-msvc, os: windows-latest }
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04, container: "node:22-bullseye" }
-          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, container: "node:22-bullseye" }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04, container: "ubuntu:22.04" }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, container: "ubuntu:22.04" }
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
     defaults:
@@ -77,15 +77,17 @@ jobs:
       # No VC++ redistributable needed on Windows.
       RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Install ALSA headers (Linux)
+      - name: Install build tools and ALSA headers (Linux)
         if: matrix.container
-        run: apt-get update && apt-get install -y pkg-config libasound2-dev
+        working-directory: .
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates curl git pkg-config libasound2-dev
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: actions/setup-node@v4
-        if: ${{ !matrix.container }}
         with:
           node-version: 22
       - run: npm ci
@@ -245,13 +247,17 @@ jobs:
       - name: Distributions
         if: matrix.server == 'pulseaudio'
         run: |
+          # check <image> <expectation> [setup command]
           check() {
             docker run --rm -v "$GITHUB_WORKSPACE:/repo:ro" -v "${{ runner.temp }}/package:/package:ro" "$1" \
-              sh -c "command -v bash >/dev/null || apk add --no-cache bash >/dev/null; bash /repo/bindings/node/test/ci/distro-check.sh $2 /package" \
+              sh -c "${3:-true} && { command -v bash >/dev/null || apk add --no-cache bash >/dev/null; } && bash /repo/bindings/node/test/ci/distro-check.sh $2 /package" \
               | tee /dev/stderr | grep '^RESULT' >>"$GITHUB_STEP_SUMMARY"
           }
           set -o pipefail
-          check node:18-bullseye ok               # glibc 2.31, the floor; oldest Node
-          check node:20-bookworm ok
-          check node:22-bookworm-slim ok-or-alsa  # no libasound2
+          echo "### Distributions" >>"$GITHUB_STEP_SUMMARY"
+          alsa="apt-get update >/dev/null && apt-get install -y libasound2 >/dev/null"
+          check node:18-bookworm-slim ok "$alsa"  # glibc 2.36; oldest Node
+          check node:22-bookworm-slim ok "$alsa"
+          check node:22-bookworm-slim ok-or-alsa  # no libasound2: does it load?
+          check node:24-trixie-slim ok-or-alsa
           check node:22-alpine no-prebuild        # musl: no binary yet

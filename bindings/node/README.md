@@ -28,7 +28,7 @@ await recorder.close();
 - `open` can take seconds (Bluetooth); `stop` and `close` can too when a device misbehaves. None of them block the event loop.
 - An idle open recorder doesn't keep the process alive; a running recording does, until stopped. Close recorders you're done with; each holds its device.
 
-Prebuilt for macOS (arm64, x64; 11+), Windows (x64, arm64), and Linux glibc 2.31+ (x64, arm64). There are no install scripts. On Linux it uses PulseAudio or PipeWire when running, with ALSA as the fallback. Linux musl (Alpine) isn't built yet.
+Prebuilt for macOS (arm64, x64; 11+), Windows (x64, arm64), and Linux glibc 2.35+ (x64, arm64: Ubuntu 22.04+, Debian 12+). There are no install scripts. On Linux it uses PulseAudio or PipeWire when running, with ALSA as the fallback. Linux musl (Alpine) isn't built yet.
 
 ## Developing
 

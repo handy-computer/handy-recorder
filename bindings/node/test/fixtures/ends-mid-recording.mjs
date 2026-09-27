@@ -8,7 +8,8 @@ const fake = fedMic();
 let chunks = 0;
 const recorder = await openFake(fake, { ...SPEECH, onChunk: () => chunks++ });
 recorder.start();
-await sleep(200);
+// Recording in earnest: audio has reached JavaScript.
+for (let i = 0; i < 500 && chunks === 0; i++) await sleep(10);
 console.log(`ready ${chunks}`);
 if (mode === "exit") process.exit(7);
 if (mode === "throw") setTimeout(() => { throw new Error("uncaught mid-recording"); }, 0);
