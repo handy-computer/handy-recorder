@@ -33,13 +33,26 @@ if ! pactl info >/dev/null 2>&1; then
 fi
 pactl info | grep -E "Server Name|Server Version"
 
+# pipewire-pulse answers `pactl info` before WirePlumber, which manages
+# devices and defaults, is up; until then setup fails "Not supported".
+# Retry each step until it takes effect.
+retry() {
+    for _ in $(seq 100); do
+        "$@" >/dev/null 2>&1 && return 0
+        sleep 0.1
+    done
+    echo "gave up: $*" >&2
+    return 1
+}
+
 pactl unload-module module-null-sink 2>/dev/null || true
-pactl load-module module-null-sink sink_name=probe_noise >/dev/null
+retry pactl load-module module-null-sink sink_name=probe_noise
+retry sh -c 'pactl list short sources | grep -q probe_noise.monitor'
 pacat --playback --device=probe_noise --volume=32768 --latency-msec=50 --raw --format=s16le --rate=48000 --channels=2 </dev/urandom &
 noise=$!
 out=$(mktemp)
 trap 'kill $noise 2>/dev/null || true; rm -f "$out"' EXIT
-pactl set-default-source probe_noise.monitor
+retry sh -c 'pactl set-default-source probe_noise.monitor && [ "$(pactl get-default-source)" = probe_noise.monitor ]'
 
 cargo run --release -p handy-recorder-probe -- auto | tee "$out"
 # `virtual-disconnect` reports INFO, not FAIL, when the library is not on
