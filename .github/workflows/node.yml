@@ -208,6 +208,53 @@ jobs:
           test "$(node -p process.arch)" = x64
           node smoke.mjs | tee /dev/stderr | grep -q "darwin-x64"
 
+  # Experimental: real CoreAudio capture through BlackHole, a virtual audio
+  # device, with a tone played into its output. Unknown whether the runner's
+  # processes have microphone permission; without it CoreAudio delivers
+  # silence, and this shows what the recorder reports then.
+  package-macos-blackhole:
+    name: Package (macOS, BlackHole)
+    needs: package
+    runs-on: macos-latest
+    continue-on-error: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@v2
+      - name: Install BlackHole and make it the default output
+        run: |
+          brew install blackhole-2ch switchaudio-osx
+          sudo killall coreaudiod || true
+          for _ in $(seq 30); do SwitchAudioSource -a -t input | grep -q BlackHole && break; sleep 1; done
+          SwitchAudioSource -a -t input
+          SwitchAudioSource -t output -s "BlackHole 2ch"
+      - name: Microphone permission entries (informational)
+        run: |
+          sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" \
+            "select client, auth_value from access where service = 'kTCCServiceMicrophone'" || true
+          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+            "select client, auth_value from access where service = 'kTCCServiceMicrophone'" || true
+      - uses: actions/download-artifact@v4
+        with:
+          name: package
+          path: ${{ runner.temp }}/package
+      - run: bindings/node/test/ci/install-package.sh npm "${{ runner.temp }}/package" "${{ runner.temp }}/smoke"
+      - name: Record a tone from BlackHole
+        working-directory: ${{ runner.temp }}/smoke
+        env:
+          HANDY_RECORDER_SMOKE_DEVICE: BlackHole
+        run: |
+          (while true; do afplay /System/Library/Sounds/Submarine.aiff; done) &
+          tone=$!
+          trap 'kill $tone 2>/dev/null || true' EXIT
+          node smoke.mjs
+          bun smoke.mjs
+
   # Linux: real recording from PulseAudio and PipeWire under each runtime,
   # then the package on older and slimmer distributions, and on musl.
   package-linux:
