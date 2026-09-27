@@ -44,15 +44,22 @@ for _ in $(seq 100); do
 done
 pactl info | grep -E "Server Name|Server Version"
 
-# A server can answer `pactl info` before it can load modules
-# (pipewire-pulse before WirePlumber is up): retry.
-for _ in $(seq 100); do
-    pactl load-module module-null-sink sink_name=smoke_noise >/dev/null 2>&1 && break
-    sleep 0.1
-done
-pactl list short sinks | grep -q smoke_noise || { echo "could not create the null sink" >&2; exit 1; }
+# pipewire-pulse answers `pactl info` before WirePlumber, which manages
+# devices and defaults, is up; until then setup fails "Not supported".
+# Retry each step until it takes effect.
+retry() {
+    for _ in $(seq 100); do
+        "$@" >/dev/null 2>&1 && return 0
+        sleep 0.1
+    done
+    echo "gave up: $*" >&2
+    return 1
+}
+retry pactl load-module module-null-sink sink_name=smoke_noise
+retry sh -c 'pactl list short sources | grep -q smoke_noise.monitor'
 pacat --playback --device=smoke_noise --volume=32768 --latency-msec=50 --raw --format=s16le --rate=48000 --channels=2 </dev/urandom &
 pids+=($!)
-pactl set-default-source smoke_noise.monitor
+retry sh -c 'pactl set-default-source smoke_noise.monitor && [ "$(pactl get-default-source)" = smoke_noise.monitor ]'
+echo "default source: $(pactl get-default-source)"
 
 "$@"
