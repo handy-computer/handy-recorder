@@ -1,0 +1,22 @@
+[package]
+name = "handy-recorder-node"
+version = "0.0.0"
+edition = "2024"
+description = "Node.js bindings for handy-recorder (npm: @handy-computer/recorder)."
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+# Exports `FakeMic`, the core's fake microphone, for this package's tests.
+# Never in a published build.
+test-backend = ["handy-recorder/test-backend"]
+
+[dependencies]
+handy-recorder = { path = "../../crates/handy-recorder" }
+napi = { version = "3", default-features = false, features = ["napi6"] }
+napi-derive = "3"
+
+[build-dependencies]
+napi-build = "2"

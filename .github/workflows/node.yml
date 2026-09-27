@@ -1,0 +1,257 @@
+name: Node bindings
+
+# @handy-computer/recorder (bindings/node): behavior under every runtime,
+# prebuilt binaries for every target, and the packed package installed and
+# run the ways users will. Nothing is published from here.
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The test build (the fake microphone) under Node 22 and 24, Bun and Deno,
+  # on each platform's own runner: recording, lifecycle, worker threads,
+  # jiti reloads, and pi's compiled Bun binary.
+  test:
+    name: Test (${{ matrix.os }}, node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-24.04, ubuntu-24.04-arm]
+        node: [22, 24]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: bindings/node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install ALSA headers (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: oven-sh/setup-bun@v2
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - run: npm ci
+      - run: cargo clippy -p handy-recorder-node --features test-backend --all-targets -- -D warnings
+      - run: npm run typecheck
+      - run: npm run build:test
+      - run: node test/run.mjs
+      - run: node test/run.mjs --runtime bun
+      - run: node test/run.mjs --runtime "deno run -A"
+
+  # The published binaries, one per target. Linux builds in Debian 11
+  # (glibc 2.31), so the binary loads on distributions that old and newer.
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          - { target: aarch64-pc-windows-msvc, os: windows-latest }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04, container: "node:22-bullseye" }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, container: "node:22-bullseye" }
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: bindings/node
+    env:
+      # Node 22 needs macOS 11 or later anyway.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      # No VC++ redistributable needed on Windows.
+      RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ALSA headers (Linux)
+        if: matrix.container
+        run: apt-get update && apt-get install -y pkg-config libasound2-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        if: ${{ !matrix.container }}
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run build -- --target ${{ matrix.target }}
+      - name: Check the binary's dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          file=$(ls prebuilds/*.node)
+          {
+            echo "### ${{ matrix.target }}"
+            echo '```'
+            readelf -d "$file" | grep NEEDED
+            echo "newest glibc symbol: $(objdump -T "$file" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n1)"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Check CoreAudio is weak-linked (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          file=$(ls prebuilds/*.node)
+          nm -m "$file" | grep -E "AudioHardware(Create|Destroy)ProcessTap"
+          ! nm -m "$file" | grep -E "AudioHardware(Create|Destroy)ProcessTap" | grep -v weak
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prebuild-${{ matrix.target }}
+          path: bindings/node/prebuilds/*.node
+          if-no-files-found: error
+
+  # One package with every binary. Its size goes in the job summary.
+  package:
+    needs: build
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: bindings/node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: prebuild-*
+          path: bindings/node/prebuilds
+          merge-multiple: true
+      - run: test "$(ls prebuilds/*.node | wc -l)" -eq 6
+      - run: npm pack
+      - name: Size report
+        run: |
+          node test/ci/size-report.mjs *.tgz | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package
+          path: bindings/node/*.tgz
+
+  # The package installed with each package manager, scripts off, and run
+  # under each runtime (Yarn Plug'n'Play: through `yarn node`).
+  package-test:
+    name: Package (${{ matrix.os }}, ${{ matrix.installer }})
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-24.04, ubuntu-24.04-arm]
+        installer: [npm, pnpm, bun, yarn]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@v2
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - uses: actions/download-artifact@v4
+        with:
+          name: package
+          path: ${{ runner.temp }}/package
+      - run: bindings/node/test/ci/install-package.sh ${{ matrix.installer }} "${{ runner.temp }}/package" "${{ runner.temp }}/smoke"
+      - name: Smoke (yarn node)
+        if: matrix.installer == 'yarn'
+        working-directory: ${{ runner.temp }}/smoke
+        run: npx --yes -p @yarnpkg/cli-dist@4 yarn node smoke.mjs
+      - name: Smoke (node, bun, deno)
+        if: matrix.installer != 'yarn'
+        working-directory: ${{ runner.temp }}/smoke
+        run: |
+          node smoke.mjs
+          bun smoke.mjs
+          deno run -A smoke.mjs
+
+  # The darwin-x64 binary, cross-built on an arm64 runner, loaded by an x64
+  # Node under Rosetta. (win32-arm64 is built but never loaded: no runner.)
+  package-darwin-x64:
+    name: Package (macOS x64 under Rosetta)
+    needs: package
+    runs-on: macos-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          architecture: x64
+      - uses: actions/download-artifact@v4
+        with:
+          name: package
+          path: ${{ runner.temp }}/package
+      - run: bindings/node/test/ci/install-package.sh npm "${{ runner.temp }}/package" "${{ runner.temp }}/smoke"
+      - name: Smoke (x64 node)
+        working-directory: ${{ runner.temp }}/smoke
+        run: |
+          test "$(node -p process.arch)" = x64
+          node smoke.mjs | tee /dev/stderr | grep -q "darwin-x64"
+
+  # Linux: real recording from PulseAudio and PipeWire under each runtime,
+  # then the package on older and slimmer distributions, and on musl.
+  package-linux:
+    name: Package (Linux, ${{ matrix.server }})
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - server: pulseaudio
+            packages: pulseaudio
+          - server: pipewire
+            packages: pipewire pipewire-pulse wireplumber dbus
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y pulseaudio-utils ${{ matrix.packages }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@v2
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - uses: actions/download-artifact@v4
+        with:
+          name: package
+          path: ${{ runner.temp }}/package
+      - run: bindings/node/test/ci/install-package.sh npm "${{ runner.temp }}/package" "${{ runner.temp }}/smoke"
+      - name: Record from the sound server
+        working-directory: ${{ runner.temp }}/smoke
+        env:
+          HANDY_RECORDER_SMOKE_DEVICE: default
+        run: |
+          "$GITHUB_WORKSPACE/bindings/node/test/ci/with-sound-server.sh" ${{ matrix.server }} \
+            bash -c 'node smoke.mjs && bun smoke.mjs && deno run -A smoke.mjs'
+      - name: Distributions
+        if: matrix.server == 'pulseaudio'
+        run: |
+          check() {
+            docker run --rm -v "$GITHUB_WORKSPACE:/repo:ro" -v "${{ runner.temp }}/package:/package:ro" "$1" \
+              sh -c "command -v bash >/dev/null || apk add --no-cache bash >/dev/null; bash /repo/bindings/node/test/ci/distro-check.sh $2 /package" \
+              | tee /dev/stderr | grep '^RESULT' >>"$GITHUB_STEP_SUMMARY"
+          }
+          set -o pipefail
+          check node:18-bullseye ok               # glibc 2.31, the floor; oldest Node
+          check node:20-bookworm ok
+          check node:22-bookworm-slim ok-or-alsa  # no libasound2
+          check node:22-alpine no-prebuild        # musl: no binary yet

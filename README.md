@@ -39,6 +39,10 @@ cargo run --example record
 cargo run --example push_to_talk
 ```
 
+## Node.js, Bun, and Deno
+
+`bindings/node` is the npm package `@handy-computer/recorder`; see its [README](bindings/node/README.md).
+
 ## macOS < 14.2
 
 CPAL links two CoreAudio functions that only exist on macOS 14.2+. If your binary needs to launch on older macOS, weak-link CoreAudio, e.g. in `.cargo/config.toml`:

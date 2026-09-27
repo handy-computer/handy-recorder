@@ -45,6 +45,9 @@ mod error;
 mod sink;
 mod types;
 
+#[cfg(feature = "test-backend")]
+#[doc(hidden)]
+pub mod testing;
 #[cfg(test)]
 mod tests;
 

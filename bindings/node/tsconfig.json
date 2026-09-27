@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "ESNext.Disposable"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": false,
+    "types": ["node"],
+    "paths": { "@handy-computer/recorder": ["./index.d.ts"] }
+  },
+  "files": ["test/types.ts"]
+}

@@ -1,6 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["crates/handy-recorder", "tools/probe"]
+members = ["crates/handy-recorder", "bindings/node", "tools/probe"]
 # `cargo build` and `cargo test` at the root touch only the library; the
 # probe is built with `-p handy-recorder-probe` or `--workspace`.
 default-members = ["crates/handy-recorder"]
+
+# The Node addon's published build (bindings/node, `npm run build`).
+[profile.node-release]
+inherits = "release"
+strip = "symbols"
+lto = "fat"
+codegen-units = 1

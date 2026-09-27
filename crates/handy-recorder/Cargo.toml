@@ -5,6 +5,11 @@ edition = "2024"
 description = "Cross-platform microphone capture: exact, ordered, framed audio on an ordinary thread."
 publish = false
 
+[features]
+# A deterministic fake microphone, for bindings' own test suites (`testing`).
+# Not for applications; not covered by semver.
+test-backend = []
+
 [dependencies]
 # Sample conversion to f32. cpal 0.18 re-exports the same crate; depending on
 # it directly keeps conversion independent of the backend's cpal version.

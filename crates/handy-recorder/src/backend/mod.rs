@@ -2,7 +2,8 @@
 //! production, `fake.rs` in tests. Everything platform-specific lives here.
 
 pub(crate) mod cpal;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-backend"))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod fake;
 #[cfg(target_os = "macos")]
 mod headset_macos;

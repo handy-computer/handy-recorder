@@ -1,0 +1,56 @@
+{
+  "name": "@handy-computer/recorder",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Cross-platform microphone capture for Node.js and Bun: exact, ordered, fixed-size chunks of audio, with device loss and stalls reported.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/handy-computer/handy-recorder.git",
+    "directory": "bindings/node"
+  },
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "native.js",
+    "prebuilds/*.node",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "napi": {
+    "binaryName": "recorder",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc",
+      "aarch64-pc-windows-msvc"
+    ]
+  },
+  "scripts": {
+    "build": "napi build --platform --profile node-release --no-js --output-dir prebuilds --dts native.d.ts",
+    "build:test": "napi build --platform --release --features test-backend --no-js --output-dir build/test --dts native.d.ts",
+    "test": "node test/run.mjs",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "3.10.5",
+    "jiti": "2.7.0",
+    "typescript": "5.9.3",
+    "@types/node": "22.20.1"
+  },
+  "preferUnplugged": true
+}
