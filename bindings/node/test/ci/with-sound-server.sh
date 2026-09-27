@@ -44,7 +44,13 @@ for _ in $(seq 100); do
 done
 pactl info | grep -E "Server Name|Server Version"
 
-pactl load-module module-null-sink sink_name=smoke_noise >/dev/null
+# A server can answer `pactl info` before it can load modules
+# (pipewire-pulse before WirePlumber is up): retry.
+for _ in $(seq 100); do
+    pactl load-module module-null-sink sink_name=smoke_noise >/dev/null 2>&1 && break
+    sleep 0.1
+done
+pactl list short sinks | grep -q smoke_noise || { echo "could not create the null sink" >&2; exit 1; }
 pacat --playback --device=smoke_noise --volume=32768 --latency-msec=50 --raw --format=s16le --rate=48000 --channels=2 </dev/urandom &
 pids+=($!)
 pactl set-default-source smoke_noise.monitor

@@ -188,13 +188,15 @@ jobs:
           sudo killall coreaudiod || true
           for _ in $(seq 30); do SwitchAudioSource -a -t input | grep -q BlackHole && break; sleep 1; done
           SwitchAudioSource -t output -s "BlackHole 2ch"
+          node bindings/node/test/ci/tone.mjs "$RUNNER_TEMP/tone.wav"
       - name: Install, smoke, and record from BlackHole (macOS)
         if: runner.os == 'macOS'
         env:
           HANDY_RECORDER_SMOKE_DEVICE: BlackHole
         run: |
-          (while true; do afplay /System/Library/Sounds/Submarine.aiff; done) &
+          afplay "$RUNNER_TEMP/tone.wav" &
           trap 'kill $! 2>/dev/null || true' EXIT
+          sleep 1
           "$MATRIX" "$RUNNER_TEMP/package" "$RUNNER_TEMP/smoke"
       # The darwin-x64 binary, cross-built, loaded by an x64 Node under
       # Rosetta. (win32-arm64 is built but never loaded: no runner.)
@@ -209,8 +211,9 @@ jobs:
           HANDY_RECORDER_SMOKE_DEVICE: BlackHole
         run: |
           test "$(node -p process.arch)" = x64
-          (while true; do afplay /System/Library/Sounds/Submarine.aiff; done) &
+          afplay "$RUNNER_TEMP/tone.wav" &
           trap 'kill $! 2>/dev/null || true' EXIT
+          sleep 1
           out=$(cd "$RUNNER_TEMP/smoke/npm" && node smoke.mjs)
           echo "$out"
           grep -q "darwin-x64" <<<"$out"
