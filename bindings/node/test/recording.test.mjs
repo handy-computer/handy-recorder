@@ -26,6 +26,16 @@ async function rejects(promise, code) {
   return error;
 }
 
+// `fed` counts frames from just before start() until stop() resolved in
+// JavaScript, so it overcounts by whatever the feeder delivered after the
+// stream paused; a slow machine's catch-up makes that tens of ms. The
+// recording itself may begin up to one block early (start takes the audio
+// already queued). Loss shows up in assertRamp and droppedFrames, not here.
+function assertFedDuring(recording, fed) {
+  const { length } = recording.samples;
+  assert.ok(length <= fed + 160 && length >= fed - 16_000 * 0.15, `${length} samples of ${fed} fed`);
+}
+
 function throws(fn, code) {
   assert.throws(fn, (e) => e instanceof RecorderError && e.code === code);
 }
@@ -56,8 +66,7 @@ test("a recording is complete and in order, and chunks add up to it", async () =
   assert.equal(recording.droppedFrames, 0);
   assert.equal(recording.complete, true);
   assert.equal(recording.sampleRate, 16_000);
-  // Everything fed between start and stop, give or take a block at each end.
-  assert.ok(Math.abs(recording.samples.length - fed) <= 2 * 160, `${recording.samples.length} of ${fed}`);
+  assertFedDuring(recording, fed);
   assertRamp(recording.samples, fake.ramp);
 
   // Every chunk is 480 frames but the last, which excludes its padding.
@@ -87,8 +96,7 @@ test("a blocked event loop loses no audio", async () => {
   fake.stopFeeding();
   assert.equal(recording.droppedFrames, 0);
   assert.equal(recording.complete, true);
-  // Everything fed between start and stop, give or take a block at each end.
-  assert.ok(Math.abs(recording.samples.length - fed) <= 2 * 160, `${recording.samples.length} of ${fed}`);
+  assertFedDuring(recording, fed);
   assertRamp(recording.samples, fake.ramp);
   assert.equal(chunks, Math.ceil(recording.samples.length / 480));
   await recorder.close();

@@ -206,17 +206,17 @@ jobs:
         working-directory: ${{ runner.temp }}/smoke
         run: |
           test "$(node -p process.arch)" = x64
-          node smoke.mjs | tee /dev/stderr | grep -q "darwin-x64"
+          out=$(node smoke.mjs)
+          echo "$out"
+          grep -q "darwin-x64" <<<"$out"
 
-  # Experimental: real CoreAudio capture through BlackHole, a virtual audio
-  # device, with a tone played into its output. Unknown whether the runner's
-  # processes have microphone permission; without it CoreAudio delivers
-  # silence, and this shows what the recorder reports then.
+  # Real CoreAudio capture through BlackHole, a virtual audio device, with a
+  # tone played into its output. (The runner's processes already have
+  # microphone permission; BlackHole needs no reboot despite the installer.)
   package-macos-blackhole:
     name: Package (macOS, BlackHole)
     needs: package
     runs-on: macos-latest
-    continue-on-error: true
     defaults:
       run:
         shell: bash
