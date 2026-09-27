@@ -54,7 +54,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-          targets: ${{ matrix.targets }}
+      # Explicitly: the action's own `targets` list isn't installed on Windows.
+      - run: rustup target add ${TARGETS//,/ }
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
