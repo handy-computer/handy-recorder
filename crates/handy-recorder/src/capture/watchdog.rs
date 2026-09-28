@@ -46,7 +46,6 @@ impl Watchdog {
             *checked_at = checked;
             // Failed under the lock: `stop` reads the same timestamp.
             if let Suspension::DuringRecording(gap) = suspended {
-                // Logged by the device thread's loop, which runs this check.
                 shared.fail(suspended_during_recording(shared, gap, timeouts.stall));
             }
             (suspended, frozen)
@@ -129,7 +128,6 @@ impl Watchdog {
                 ))
             })
         });
-        // Logged by the device thread's loop, which runs this check.
         if let Some(error) = error {
             shared.fail(error);
         }
@@ -151,7 +149,6 @@ pub(super) fn fail_if_suspended(shared: &Shared, timeouts: &Timeouts) {
         recording_since,
         timeouts.stall,
     ) {
-        // Logged by the device thread's loop.
         shared.fail(suspended_during_recording(shared, gap, timeouts.stall));
     }
 }

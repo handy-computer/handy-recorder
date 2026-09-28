@@ -408,7 +408,6 @@ impl<S: Sink> Processor<S> {
                             "the audio callback did not run for {:.1} s while stopping",
                             self.pause_ack_timeout.as_secs_f64()
                         ));
-                        // Logged by the device thread's loop.
                         self.shared.fail(error);
                         break;
                     }

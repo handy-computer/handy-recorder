@@ -214,9 +214,10 @@ impl OpenDevice for FakeOpenDevice {
         }
         let mut state = self.0.shared.state.lock().unwrap();
         if state.stream.is_some() {
-            // Unlocked first, so the panic does not poison the fake's state.
-            drop(state);
-            panic!("the fake runs one stream at a time");
+            return Err(BackendError::new(
+                BackendErrorKind::DeviceBusy,
+                "the fake runs one stream at a time",
+            ));
         }
         state.stream = Some((data, error));
         state.streams_started += 1;
