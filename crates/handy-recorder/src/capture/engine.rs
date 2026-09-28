@@ -144,7 +144,8 @@ impl Shared {
     }
 
     /// Fails the recorder, unless it already failed. Returns the recorder's
-    /// failure: `error`, or the one that came first.
+    /// failure: `error`, or the one that came first. Doesn't log: the device
+    /// thread's loop logs the failure once, as it tears the stream down.
     pub fn fail(&self, error: Error) -> Error {
         if self.failure.set(error).is_ok() {
             let _ = self.device_tx.send(DeviceMsg::Failed);
@@ -218,6 +219,7 @@ impl<S: Sink> Engine<S> {
         handler: Option<Handler>,
         timeouts: Timeouts,
     ) -> Result<Self, Error> {
+        let opening = Instant::now();
         timeouts.validate();
         validate_request(&config)?;
         let take_headset = config.take_headset;
@@ -247,7 +249,7 @@ impl<S: Sink> Engine<S> {
                                     "the platform finished opening a stream after open timed out; releasing it"
                                 );
                                 drop(stream);
-                                log::info!("released the late-opened stream");
+                                log::debug!("released the late-opened stream");
                                 return;
                             }
                             *state = OpenState::Done;
@@ -310,10 +312,10 @@ impl<S: Sink> Engine<S> {
                     // Sink panics are caught per chunk, so this one is ours.
                     let run = AssertUnwindSafe(|| delivery::run(pipeline, &shared, delivery_rx));
                     if let Err(payload) = catch_unwind(run) {
-                        let error = shared.fail(shared.error(ErrorKind::Processing).with_detail(
-                            format!("the delivery thread panicked: {}", panic_message(&*payload)),
-                        ));
-                        log::error!("recorder failed: {error}");
+                        shared.fail(shared.error(ErrorKind::Processing).with_detail(format!(
+                            "the delivery thread panicked: {}",
+                            panic_message(&*payload)
+                        )));
                     }
                 })
         };
@@ -330,9 +332,10 @@ impl<S: Sink> Engine<S> {
         let delivery_thread = delivery.thread().id();
 
         log::info!(
-            "opened {} ({}) at {} Hz, {} ch; delivering {} Hz, {} ch, {}-frame chunks",
+            "opened {} ({}) in {} ms at {} Hz, {} ch; delivering {} Hz, {} ch, {}-frame chunks",
             info.device.name,
             info.device.backend,
+            opening.elapsed().as_millis(),
             info.device_format.sample_rate,
             info.device_format.channels,
             info.format.sample_rate,
@@ -452,9 +455,12 @@ impl<S: Sink> Engine<S> {
                         "stop did not complete within {:.1} s",
                         self.timeouts.stop.as_secs_f64()
                     ));
-                // Logged even when an earlier failure stays the recorder's error.
-                log::error!("recording lost: {stalled}");
-                Err(self.shared.fail(stalled))
+                let failure = self.shared.fail(stalled.clone());
+                // The loop logs a first failure; this recording is lost either way.
+                if failure.kind() != ErrorKind::SinkStalled {
+                    log::error!("recording lost: {stalled}");
+                }
+                Err(failure)
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 Err(self.shared.failure().unwrap_or_else(|| {
@@ -773,11 +779,15 @@ fn run_device(
         return;
     };
     // The watchdog died with it, so fail now.
+    let first = shared.failure().is_none();
     let error = shared.fail(shared.error(ErrorKind::Processing).with_detail(format!(
         "the device thread panicked: {}",
         panic_message(&*payload)
     )));
-    log::error!("recorder failed: {error}");
+    // A live stream means the loop hadn't logged an earlier failure yet.
+    if first || stream.is_some() {
+        log::error!("recorder failed: {error}");
+    }
     if catch_unwind(AssertUnwindSafe(|| teardown(&mut stream))).is_err() {
         log::error!("releasing the stream panicked");
     }
@@ -830,7 +840,7 @@ fn supervise(
         if let Some(error) = shared.failure()
             && stream.is_some()
         {
-            log::error!("recorder failed: {error}");
+            log::log!(error.kind().failure_level(), "recorder failed: {error}");
             teardown(stream);
             if let Some(handler) = handler.take() {
                 notify(handler, error);

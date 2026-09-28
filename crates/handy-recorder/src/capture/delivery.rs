@@ -408,7 +408,6 @@ impl<S: Sink> Processor<S> {
                             "the audio callback did not run for {:.1} s while stopping",
                             self.pause_ack_timeout.as_secs_f64()
                         ));
-                        log::warn!("{error}");
                         self.shared.fail(error);
                         break;
                     }
@@ -432,30 +431,12 @@ impl<S: Sink> Processor<S> {
         }
 
         let failure = self.shared.failure();
-        let active = self.active.take()?;
+        let mut active = self.active.take()?;
         let longest_zero_run = active.longest_zero_run.max(active.zero_run);
-        let end_reason = active.ended.unwrap_or(match failure {
+        let end_reason = active.ended.take().unwrap_or(match failure {
             Some(error) => EndReason::RecorderFailed(error),
             None => EndReason::StopCalled,
         });
-        let stopped = Stopped {
-            sink: active.sink,
-            end_reason,
-            dropped_frames: active.dropped_frames,
-        };
-        log::debug!(
-            "recording stopped ({:?}) after {:?}: {} frames drained at {} Hz, {} frames delivered at {} Hz, \
-             {} dropped in {} overrun episodes, first chunk after {:?}",
-            stopped.end_reason,
-            active.started.elapsed(),
-            active.input_frames,
-            self.in_sample_rate,
-            active.output_frames,
-            self.out_sample_rate,
-            stopped.dropped_frames,
-            active.overrun_episodes,
-            active.first_chunk_after,
-        );
         let rate = self.in_sample_rate as f64;
         if active.input_frames > 0 && !active.heard_nonzero {
             log::warn!(
@@ -463,7 +444,8 @@ impl<S: Sink> Processor<S> {
                 active.input_frames as f64 / rate
             );
         } else if longest_zero_run >= self.in_sample_rate as u64 {
-            log::warn!(
+            // Debug: noise-gated and Bluetooth mics send exact zeros between words.
+            log::debug!(
                 "the recording contained {:.1} s of exact digital silence: a muted device or a stalled stream",
                 longest_zero_run as f64 / rate
             );
@@ -476,14 +458,46 @@ impl<S: Sink> Processor<S> {
                  before the library received it, not counted in dropped_frames"
             );
         }
-        if !stopped.is_complete() {
-            log::warn!(
-                "incomplete recording: {:?}, {} frames dropped",
-                stopped.end_reason,
-                stopped.dropped_frames
-            );
+        log_stop(&active, &end_reason);
+        Some(Stopped {
+            sink: active.sink,
+            end_reason,
+            dropped_frames: active.dropped_frames,
+        })
+    }
+}
+
+/// One line per recording: info when complete, warn when it ended early or
+/// dropped audio (a failure is also logged where it happened).
+fn log_stop<S>(active: &Active<S>, end_reason: &EndReason) {
+    let elapsed = active.started.elapsed().as_secs_f64();
+    let first = match active.first_chunk_after {
+        Some(after) => format!("first audio after {} ms", after.as_millis()),
+        None => "no audio".to_owned(),
+    };
+    let dropped = if active.dropped_frames > 0 {
+        format!(
+            ", {} dropped in {} overruns",
+            active.dropped_frames, active.overrun_episodes
+        )
+    } else {
+        String::new()
+    };
+    let details = format!("{first}, {} frames{dropped}", active.output_frames);
+    match end_reason {
+        EndReason::StopCalled if active.dropped_frames == 0 => {
+            log::info!("recording stopped after {elapsed:.1} s: {details}");
         }
-        Some(stopped)
+        EndReason::StopCalled => {
+            log::warn!("recording stopped after {elapsed:.1} s with audio dropped: {details}");
+        }
+        EndReason::RecorderFailed(error) => {
+            let kind = error.kind();
+            log::warn!("recording ended early after {elapsed:.1} s ({kind:?}): {details}");
+        }
+        EndReason::SinkPanicked(_) => {
+            log::warn!("recording ended early after {elapsed:.1} s (SinkPanicked): {details}");
+        }
     }
 }
 

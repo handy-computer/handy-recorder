@@ -213,7 +213,12 @@ impl OpenDevice for FakeOpenDevice {
             gate.wait();
         }
         let mut state = self.0.shared.state.lock().unwrap();
-        assert!(state.stream.is_none(), "the fake runs one stream at a time");
+        if state.stream.is_some() {
+            return Err(BackendError::new(
+                BackendErrorKind::DeviceBusy,
+                "the fake runs one stream at a time",
+            ));
+        }
         state.stream = Some((data, error));
         state.streams_started += 1;
         drop(state);

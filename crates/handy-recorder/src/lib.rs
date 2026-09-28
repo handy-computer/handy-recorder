@@ -45,6 +45,9 @@ mod error;
 mod sink;
 mod types;
 
+#[cfg(feature = "test-backend")]
+#[doc(hidden)]
+pub mod testing;
 #[cfg(test)]
 mod tests;
 
@@ -169,7 +172,8 @@ impl<S> std::error::Error for StartError<S> {}
 pub struct Stopped<S> {
     pub sink: S,
     pub end_reason: EndReason,
-    /// Frames lost because the ring was full, usually a slow sink.
+    /// Frames lost because the ring was full, usually a slow sink. Counted at
+    /// the device's rate, before resampling.
     pub dropped_frames: u64,
 }
 

@@ -160,6 +160,31 @@ impl ErrorKind {
         )
     }
 
+    /// The level a recorder failing with this kind is logged at: warn when
+    /// the device, system, or platform changed under it; error when the sink
+    /// or this library is at fault.
+    pub(crate) fn failure_level(self) -> log::Level {
+        match self {
+            Self::NoAudio
+            | Self::DeviceLost
+            | Self::StreamInvalidated
+            | Self::Stalled
+            | Self::PermissionDenied
+            | Self::Backend => log::Level::Warn,
+            Self::SinkStalled | Self::Processing => log::Level::Error,
+            // Never a recorder's failure: from `open`, or misuse.
+            Self::DeviceUnavailable
+            | Self::DeviceBusy
+            | Self::UnsupportedFormat
+            | Self::InvalidChannel
+            | Self::OpenTimedOut
+            | Self::AlreadyRecording
+            | Self::NotRecording
+            | Self::StopFromSink
+            | Self::CloseTimedOut => log::Level::Error,
+        }
+    }
+
     /// The phrase `Display` uses, after the device's name if there is one.
     fn describe(self, after_device: bool) -> &'static str {
         match (self, after_device) {

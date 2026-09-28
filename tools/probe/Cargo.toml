@@ -3,6 +3,7 @@ name = "handy-recorder-probe"
 version = "0.0.0"
 edition = "2024"
 description = "Hardware probes for handy-recorder."
+license = "MIT"
 publish = false
 
 [dependencies]

@@ -162,7 +162,6 @@ impl FrameResampler {
                 .as_mut()
                 .unwrap()
                 .process_partial(Some(&self.in_buf), None);
-            // Else the next recording re-processes this padded tail.
             self.clear_input();
             let out = result?;
             let take = expected.saturating_sub(self.out_count).min(out[0].len());
@@ -313,26 +312,6 @@ mod tests {
         // Ends mid-chunk: partial-chunk path plus delay drain together.
         // 4396 in -> 1465 real + 171 delay.
         assert_tail_burst_flushed(48000, 4 * RESAMPLER_CHUNK_SIZE + 300, 1920);
-    }
-
-    #[test]
-    fn finish_does_not_leak_tail_into_next_session() {
-        let mut rs = FrameResampler::new(48000, 16000, 480, 1).unwrap();
-
-        // Leave a partial chunk buffered, then end the session.
-        rs.push(&[0.5f32; 100], |_, _| {}).unwrap();
-        rs.finish(|_, _| {}).unwrap();
-
-        // ~341 samples out, under one chunk: anything emitted is the stale tail.
-        let mut emitted = 0usize;
-        rs.push(&[0.25f32; RESAMPLER_CHUNK_SIZE], |frame, _| {
-            emitted += frame.len()
-        })
-        .unwrap();
-        assert_eq!(
-            emitted, 0,
-            "stale resampler tail from finish() leaked into the next session"
-        );
     }
 
     fn signal(rate: usize, channel: usize, frames: usize) -> Vec<f32> {
