@@ -22,11 +22,12 @@ async function rejects(promise, code) {
 // `fed` counts frames from just before start() until stop() resolved in
 // JavaScript, so it overcounts by whatever the feeder delivered after the
 // stream paused; a slow machine's catch-up makes that tens of ms. The
-// recording itself may begin up to one block early (start takes the audio
-// already queued). Loss shows up in assertRamp and droppedFrames, not here.
+// recording itself may begin early by whatever audio was already queued at
+// start, several blocks after a catch-up burst. Loss and duplication show up
+// in assertRamp and droppedFrames, not here.
 function assertFedDuring(recording, fed) {
   const { length } = recording.samples;
-  assert.ok(length <= fed + 160 && length >= fed - 16_000 * 0.15, `${length} samples of ${fed} fed`);
+  assert.ok(length <= fed + 16_000 * 0.05 && length >= fed - 16_000 * 0.15, `${length} samples of ${fed} fed`);
 }
 
 function throws(fn, code) {
