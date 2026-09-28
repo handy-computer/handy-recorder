@@ -3,6 +3,7 @@ name = "handy-recorder-node"
 version = "0.0.0"
 edition = "2024"
 description = "Node.js bindings for handy-recorder (npm: @handy-computer/recorder)."
+license = "MIT"
 publish = false
 
 [lib]
