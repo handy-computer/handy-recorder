@@ -1,11 +1,13 @@
 name: Node bindings
 
 # Tests bindings/node, builds its binaries, and checks the packed package
-# installs and works on each OS. Nothing is published from here.
+# installs and works on each OS. A `node-v<version>` tag also publishes it.
 
 on:
   push:
     branches: [main]
+    # Tag pushes skip the path filters.
+    tags: ["node-v*"]
     paths:
       - bindings/node/**
       - crates/**
@@ -141,7 +143,12 @@ jobs:
           pattern: prebuilds-*
           path: bindings/node/prebuilds
           merge-multiple: true
-      - run: test "$(ls prebuilds/*.node | wc -l)" -eq 6
+      - name: Exactly the six binaries native.js loads
+        run: |
+          for target in darwin-arm64 darwin-x64 linux-x64-gnu linux-arm64-gnu win32-x64-msvc win32-arm64-msvc; do
+            test -f "prebuilds/recorder.$target.node" || { echo "missing recorder.$target.node"; exit 1; }
+          done
+          test "$(ls prebuilds/*.node | wc -l)" -eq 6
       - run: npm pack
       - uses: actions/upload-artifact@v4
         with:
@@ -241,3 +248,37 @@ jobs:
           check node:22-bookworm-slim alsa || failed=1        # no libasound2: the install hint
           check node:22-alpine no-prebuild || failed=1        # musl: no binary yet
           exit $failed
+
+  # Publishes the .tgz package-check tested, through npm trusted publishing:
+  # no token, and provenance is automatic. npm's trusted publisher for the
+  # package names this repository and workflow file (node.yml).
+  publish:
+    if: startsWith(github.ref, 'refs/tags/node-v')
+    needs: [package, package-check]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@^11.5.1
+      - uses: actions/download-artifact@v4
+        with:
+          name: package
+      - name: Publish
+        run: |
+          tgz=$(ls handy-computer-recorder-*.tgz)
+          version=$(tar -xOzf "$tgz" package/package.json | jq -r .version)
+          if [ "node-v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME doesn't match package version $version"
+            exit 1
+          fi
+          # A prerelease (0.1.0-beta.1) mustn't become `latest`.
+          case "$version" in
+            *-*) npm publish "$tgz" --tag next ;;
+            *) npm publish "$tgz" ;;
+          esac

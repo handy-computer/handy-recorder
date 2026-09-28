@@ -1,4 +1,4 @@
-// @handy-computer/recorder: microphone capture for Node.js and Bun.
+// @handy-computer/recorder: microphone capture for Node.js, Bun, and Deno.
 //
 // The native addon does the work on threads of its own and reports back
 // through one ordered event channel per recorder; this wrapper turns those

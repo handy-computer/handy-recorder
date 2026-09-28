@@ -3,7 +3,7 @@
 // HANDY_RECORDER_NATIVE, if set, is the path of a .node file to load instead
 // (this package's tests use it for the build with the fake microphone).
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,8 +12,10 @@ const require = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
 
 function isMusl() {
+  // glibc reports its version; failing that, musl's loader gives it away.
+  if (process.report?.getReport?.().header?.glibcVersionRuntime) return false;
   try {
-    return readFileSync("/usr/bin/ldd", "utf8").includes("musl");
+    return readdirSync("/lib").some((name) => name.startsWith("ld-musl-"));
   } catch {
     return false;
   }
@@ -38,7 +40,8 @@ function load() {
   const file = suffix && join(here, "prebuilds", `recorder.${suffix}.node`);
   if (!file || !existsSync(file)) {
     throw new Error(
-      `@handy-computer/recorder has no prebuilt binary for ${suffix ?? `${process.platform}-${process.arch}`}`,
+      `@handy-computer/recorder has no prebuilt binary for ${suffix ?? `${process.platform}-${process.arch}`}` +
+        " (built for macOS, Windows, and Linux glibc, each x64 and arm64)",
     );
   }
   try {
@@ -48,7 +51,8 @@ function load() {
     if (process.platform === "linux" && /libasound/.test(String(error?.message))) {
       hint = " Install the ALSA library (Debian/Ubuntu: libasound2, Fedora: alsa-lib).";
     }
-    throw new Error(`@handy-computer/recorder could not load ${file}: ${error?.message}.${hint}`, {
+    const message = String(error?.message).replace(/\.?$/, ".");
+    throw new Error(`@handy-computer/recorder could not load ${file}: ${message}${hint}`, {
       cause: error,
     });
   }

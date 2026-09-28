@@ -108,7 +108,7 @@ export interface Recording {
   sampleRate: number;
   channels: number;
   endReason: EndReason;
-  /** Frames lost because the ring was full. */
+  /** Frames lost because the ring was full, at the device's rate (`info.deviceFormat`). */
   droppedFrames: number;
   /** `endReason` is `stopCalled` and nothing was dropped. */
   complete: boolean;
