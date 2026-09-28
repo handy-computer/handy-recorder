@@ -252,18 +252,23 @@ fn not_open() -> NapiError {
     NapiError::new(Status::GenericFailure, "the recorder is not open")
 }
 
+impl NativeRecorder {
+    /// The open recorder and its event channel.
+    fn handles(&self) -> Result<(Arc<Core>, Events)> {
+        let state = self.state.lock().unwrap();
+        match (&state.recorder, &state.events) {
+            (Some(recorder), Some(events)) => Ok((Arc::clone(recorder), Arc::clone(events))),
+            _ => Err(not_open()),
+        }
+    }
+}
+
 #[napi]
 impl NativeRecorder {
     /// Starts a recording. Never waits. Returns the error, if any.
     #[napi]
     pub fn start(&self) -> Result<Option<JsErrorInfo>> {
-        let (recorder, events) = {
-            let state = self.state.lock().unwrap();
-            match (&state.recorder, &state.events) {
-                (Some(recorder), Some(events)) => (Arc::clone(recorder), Arc::clone(events)),
-                _ => return Err(not_open()),
-            }
-        };
+        let (recorder, events) = self.handles()?;
         let sink = JsSink {
             samples: Vec::new(),
             collect: self.collect,
@@ -279,15 +284,13 @@ impl NativeRecorder {
     /// chunk of the recording.
     #[napi]
     pub fn stop(&self) -> Result<()> {
-        let (recorder, events) = {
-            let state = self.state.lock().unwrap();
-            match (&state.recorder, &state.events) {
-                (Some(recorder), Some(events)) => (Arc::clone(recorder), Arc::clone(events)),
-                _ => return Err(not_open()),
-            }
-        };
+        let (recorder, events) = self.handles()?;
         spawn("handy-recorder-node-stop", move || {
-            let event = match recorder.stop() {
+            let result = recorder.stop();
+            // Let go before JavaScript hears, so a `close` that follows holds
+            // the only reference and waits for the device.
+            drop(recorder);
+            let event = match result {
                 Ok(stopped) => Event::Stopped {
                     samples: stopped.sink.samples,
                     end_reason: stopped.end_reason,
@@ -314,7 +317,9 @@ impl NativeRecorder {
             let result = match Arc::try_unwrap(recorder) {
                 Ok(recorder) => recorder.close(),
                 // A stop thread still holds it; the last holder's drop closes
-                // it. The wrapper waits for stops, so this doesn't happen.
+                // it. Not expected: stop threads let go before `stopped`, and
+                // the wrapper waits for a pending stop and refuses `start`
+                // while one is pending.
                 Err(shared) => {
                     drop(shared);
                     Ok(())
@@ -327,8 +332,11 @@ impl NativeRecorder {
 }
 
 impl Drop for NativeRecorder {
-    /// Collected or torn down without `close`: close off this thread, which
-    /// is JavaScript's, since closing can take seconds.
+    /// Torn down without `close`: close off this thread, which is
+    /// JavaScript's, since closing can take seconds. An open recorder is never
+    /// collected (its event channel holds the dispatcher, which holds the
+    /// wrapper), so this runs when the environment exits: the process, or a
+    /// worker.
     fn drop(&mut self) {
         let recorder = {
             let mut state = self.state.lock().unwrap();

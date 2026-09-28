@@ -22,12 +22,12 @@ use(recording.samples); // Float32Array
 await recorder.close();
 ```
 
-- `listInputDevices()` lists devices; pass an `id` as `device`.
+- `await listInputDevices()` lists devices; pass an `id` as `device`.
 - `permissionStatus()` reads the microphone permission without prompting.
 - `setLogHandler(handler, { level })` sends the native library's log to you (default `info`), stamped with when each line was written. Nothing is logged without a handler.
 - Errors are `RecorderError`s. Match on `code`; `index.d.ts` says what to do for each.
 - `open` can take seconds (Bluetooth); `stop` and `close` can too when a device misbehaves. None of them block the event loop.
-- An idle open recorder doesn't keep the process alive; a running recording does, until stopped. Close recorders you're done with; each holds its device.
+- An idle open recorder doesn't keep the process alive; a running recording does, until stopped. Close recorders you're done with (or use `await using`): each holds its device, and dropping the last reference doesn't release it.
 
 Prebuilt for macOS (arm64, x64; 11+), Windows (x64, arm64), and Linux glibc 2.35+ (x64, arm64: Ubuntu 22.04+, Debian 12+). There are no install scripts. On Linux it uses PulseAudio or PipeWire when running, with ALSA as the fallback. Linux musl (Alpine) isn't built yet.
 

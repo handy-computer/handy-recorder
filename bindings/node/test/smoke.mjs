@@ -29,7 +29,7 @@ console.log(`permission: ${permission}`);
 
 let devices = [];
 try {
-  devices = listInputDevices();
+  devices = await listInputDevices();
   for (const d of devices) {
     console.log(`device: ${d.name}${d.isDefault ? " (default)" : ""} [${d.backend}] ${d.id}${d.isMonitor ? " monitor" : ""}`);
   }

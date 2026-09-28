@@ -90,6 +90,8 @@ export interface RecorderOptions {
   /**
    * Called when the recorder fails (device lost, stalled, permission
    * revoked). `stop()` still returns what was captured; then open a new recorder.
+   * Not ordered with other events: it can come before `open()` resolves or
+   * after `stop()` does, but never after `close()` does.
    */
   onFailure?: (error: RecorderError) => void;
 }
@@ -130,6 +132,10 @@ export interface RecorderInfo {
  * An open microphone. `start()` and `stop()` bracket each recording;
  * `close()` releases the device. An idle open recorder doesn't keep the
  * process alive; a running recording does, until stopped.
+ *
+ * Dropping every reference doesn't close it: an open recorder is never
+ * garbage-collected, and holds its device until `close()` or the process
+ * (or worker) exits. `await using` closes it for you.
  */
 export class Recorder implements AsyncDisposable {
   private constructor();
@@ -143,7 +149,10 @@ export class Recorder implements AsyncDisposable {
   readonly isClosed: boolean;
   /** The error the recorder failed with, if it has. It stays failed. */
   readonly failure: RecorderError | undefined;
-  /** Starts a recording. Never waits. Throws a `RecorderError`. */
+  /**
+   * Starts a recording. Never waits. Throws a `RecorderError`, including
+   * `AlreadyRecording` while the previous `stop()` is pending.
+   */
   start(): void;
   /** Ends the recording. Resolves after every `onChunk` of it. */
   stop(): Promise<Recording>;
@@ -155,8 +164,11 @@ export class Recorder implements AsyncDisposable {
 /** 16 kHz mono in 30 ms chunks: the usual speech-recognition input. */
 export const SPEECH: Readonly<{ sampleRate: 16000; channels: "mono"; framesPerChunk: 480 }>;
 
-/** Lists input devices. Throws a `RecorderError`. */
-export function listInputDevices(): InputDevice[];
+/**
+ * Lists input devices. Never blocks the event loop. Rejects with a
+ * `RecorderError`.
+ */
+export function listInputDevices(): Promise<InputDevice[]>;
 
 /** Microphone permission. A synchronous read; never prompts. */
 export function permissionStatus(): Permission;

@@ -17,7 +17,7 @@ import {
 export async function dictate(): Promise<Float32Array> {
   const permission: Permission = permissionStatus();
   if (permission === "denied") throw new Error("denied");
-  const devices: InputDevice[] = listInputDevices();
+  const devices: InputDevice[] = await listInputDevices();
   const microphone = devices.find((d) => !d.isMonitor && d.isDefault);
 
   await using recorder = await Recorder.open({

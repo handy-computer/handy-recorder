@@ -21,8 +21,8 @@ export class RecorderError extends Error {
 /** 16 kHz mono in 30 ms chunks: the usual speech-recognition input. */
 export const SPEECH = Object.freeze({ sampleRate: 16_000, channels: "mono", framesPerChunk: 480 });
 
-export function listInputDevices() {
-  const { devices, error } = native.listInputDevices();
+export async function listInputDevices() {
+  const { devices, error } = await native.listInputDevices();
   if (error) throw new RecorderError(error);
   return devices;
 }
@@ -88,7 +88,7 @@ function misuse(code, message) {
 function positiveInteger(options, name) {
   const value = options[name];
   if (value === undefined) return undefined;
-  if (!Number.isInteger(value) || value <= 0) {
+  if (!Number.isInteger(value) || value <= 0 || value > 0xffff_ffff) {
     throw new TypeError(`${name} must be a positive integer; got ${value}`);
   }
   return value;
@@ -199,6 +199,10 @@ export class Recorder {
     if (this.#state === "closing" || this.#state === "closed") {
       throw misuse("RecorderClosed", "the recorder is closed");
     }
+    // The library refuses too, but only until the stop thread finishes.
+    if (this.#state === "stopping") {
+      throw misuse("AlreadyRecording", "the previous recording is still stopping");
+    }
     const error = this.#native.start();
     if (error) throw new RecorderError(error);
     this.#state = "recording";
@@ -300,6 +304,8 @@ export class Recorder {
         return;
       }
       case "failed": {
+        // Reported from the library's own thread, so it can trail `closed`.
+        if (this.#state === "closed") return;
         this.#failure = new RecorderError(event.error);
         this.#onFailure?.(this.#failure);
         return;
