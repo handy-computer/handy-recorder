@@ -10,7 +10,7 @@ use std::time::Duration;
 use crate::backend::fake::{FakeBackend, Gate};
 use crate::backend::{BackendError, BackendErrorKind, DeviceFormat, SampleFormat};
 use crate::capture::engine::{Engine, Timeouts};
-use crate::{Error, Permission, Recorder, RecorderConfig, Sink};
+use crate::{Error, Recorder, RecorderConfig, Sink};
 
 /// One fake device with f32 samples. Clones share the device.
 #[derive(Clone)]
@@ -27,8 +27,6 @@ pub enum FakeError {
     DeviceNotAvailable,
     DeviceBusy,
     PermissionDenied,
-    /// `StreamInvalidated` while running.
-    StreamInvalidated,
     /// `Backend`.
     Other,
 }
@@ -39,7 +37,6 @@ impl FakeError {
             Self::DeviceNotAvailable => BackendErrorKind::DeviceNotAvailable,
             Self::DeviceBusy => BackendErrorKind::DeviceBusy,
             Self::PermissionDenied => BackendErrorKind::PermissionDenied,
-            Self::StreamInvalidated => BackendErrorKind::StreamInvalidated,
             Self::Other => BackendErrorKind::Other,
         };
         BackendError::new(kind, "reported by the fake microphone")
@@ -118,16 +115,7 @@ impl FakeMic {
         Held(self.backend.hang_teardown())
     }
 
-    pub fn set_permission(&self, permission: Permission) {
-        self.backend.set_permission(permission);
-    }
-
     pub fn is_streaming(&self) -> bool {
         self.backend.is_streaming()
-    }
-
-    /// Streams started on this device, ever.
-    pub fn streams_started(&self) -> usize {
-        self.backend.streams_started()
     }
 }

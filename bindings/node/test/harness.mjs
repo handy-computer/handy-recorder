@@ -47,7 +47,7 @@ export function busy(ms) {
 }
 
 /** The command that runs this runtime, for fixtures: `[command, ...args]`. */
-export function runtimeCommand() {
+function runtimeCommand() {
   if (process.versions.bun) return [process.execPath];
   if (globalThis.Deno) return [process.execPath, "run", "-A"];
   return [process.execPath];
@@ -66,13 +66,12 @@ export const runtimeName = process.versions.bun
  * signal 200 ms after the fixture prints "ready", time enough for it to have
  * exited if nothing kept it alive.
  */
-export function fixture(name, { args = [], timeout = 10_000, env = {}, signalOnReady } = {}) {
+export function fixture(name, { args = [], timeout = 10_000, signalOnReady } = {}) {
   const file = fileURLToPath(new URL(`./fixtures/${name}.mjs`, import.meta.url));
   const [command, ...runtimeArgs] = runtimeCommand();
   const started = performance.now();
   return new Promise((resolve, reject) => {
     const child = spawn(command, [...runtimeArgs, file, ...args], {
-      env: { ...process.env, ...env },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";

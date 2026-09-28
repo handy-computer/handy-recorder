@@ -11,9 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use handy_recorder::Permission;
 use handy_recorder::testing::{FakeError, FakeMic as CoreFakeMic, Held};
-use napi::bindgen_prelude::{Float32Array, Function, Unknown};
+use napi::bindgen_prelude::{Function, Unknown};
 use napi::{Error as NapiError, Result, Status};
 use napi_derive::napi;
 
@@ -44,7 +43,6 @@ fn fake_error(kind: &str) -> Result<FakeError> {
         "DeviceNotAvailable" => FakeError::DeviceNotAvailable,
         "DeviceBusy" => FakeError::DeviceBusy,
         "PermissionDenied" => FakeError::PermissionDenied,
-        "StreamInvalidated" => FakeError::StreamInvalidated,
         "Other" => FakeError::Other,
         _ => {
             return Err(NapiError::new(
@@ -85,12 +83,6 @@ impl FakeMic {
             dispatch,
             Box::new(move |config, handler| mic.open(config, Some(handler), open_timeout)),
         )
-    }
-
-    /// Delivers one block of interleaved samples. False if no stream runs.
-    #[napi]
-    pub fn push(&self, samples: Float32Array) -> bool {
-        self.mic.push(&samples)
     }
 
     /// Starts feeding the ramp in blocks of `block_frames`, one every
@@ -197,33 +189,9 @@ impl FakeMic {
         }
     }
 
-    /// `"granted"`, `"denied"`, `"not-determined"`, or `"unknown"`.
-    #[napi]
-    pub fn set_permission(&self, permission: String) -> Result<()> {
-        self.mic.set_permission(match permission.as_str() {
-            "granted" => Permission::Granted,
-            "denied" => Permission::Denied,
-            "not-determined" => Permission::NotDetermined,
-            "unknown" => Permission::Unknown,
-            _ => {
-                return Err(NapiError::new(
-                    Status::InvalidArg,
-                    format!("unknown permission {permission:?}"),
-                ));
-            }
-        });
-        Ok(())
-    }
-
     #[napi(getter)]
     pub fn is_streaming(&self) -> bool {
         self.mic.is_streaming()
-    }
-
-    /// Streams started on this device, ever.
-    #[napi(getter)]
-    pub fn streams_started(&self) -> u32 {
-        self.mic.streams_started() as u32
     }
 }
 

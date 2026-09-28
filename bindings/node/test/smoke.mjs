@@ -11,13 +11,10 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 
-const recorderModule = process.env.HANDY_RECORDER_SMOKE_MODULE ?? "@handy-computer/recorder";
-const { Recorder, RecorderError, SPEECH, listInputDevices, permissionStatus, __testing } = await import(
-  recorderModule
-);
+import { Recorder, RecorderError, SPEECH, listInputDevices, permissionStatus, __testing } from "@handy-computer/recorder";
 
 const runtime = process.versions.bun ? `bun ${process.versions.bun}` : globalThis.Deno ? `deno ${Deno.version.deno}` : `node ${process.versions.node}`;
-const { version } = createRequire(import.meta.url)(`${recorderModule}/package.json`);
+const { version } = createRequire(import.meta.url)("@handy-computer/recorder/package.json");
 console.log(`@handy-computer/recorder ${version} on ${runtime}, ${process.platform}-${process.arch}`);
 
 // The published build never carries the fake microphone.

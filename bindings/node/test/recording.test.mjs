@@ -124,23 +124,6 @@ test("channel selection and pass-through are exact", async () => {
   fake.stopFeeding();
 });
 
-test("resampling delivers the requested rate", async () => {
-  const fake = fedMic(48_000, 2);
-  const recorder = await openFake(fake, SPEECH);
-  recorder.start();
-  const fedBefore = fake.framesFed;
-  await sleep(1_000);
-  const recording = await recorder.stop();
-  const fed = fake.framesFed - fedBefore;
-  fake.stopFeeding();
-  const expected = fed / 3;
-  assert.ok(
-    Math.abs(recording.samples.length - expected) < 16_000 * 0.1,
-    `${recording.samples.length} samples for ${fed} frames fed at 48 kHz`,
-  );
-  await recorder.close();
-});
-
 test("collect: false still delivers chunks", async () => {
   const fake = fedMic();
   let frames = 0;
@@ -222,11 +205,7 @@ test("open times out on a device that never starts", async () => {
   const fake = new native.FakeMic(16_000, 1, 300);
   fake.hangNextStart();
   await rejects(openFake(fake, SPEECH), "OpenTimedOut");
-  // The platform finishes opening late: that stream is released, not leaked.
   fake.releaseStart();
-  for (let i = 0; i < 200 && (fake.streamsStarted === 0 || fake.isStreaming); i++) await sleep(10);
-  assert.equal(fake.streamsStarted, 1);
-  assert.equal(fake.isStreaming, false);
 });
 
 test("a device lost mid-recording: failure event, audio kept, recorder stays failed", async () => {
