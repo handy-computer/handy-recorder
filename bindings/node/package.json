@@ -1,6 +1,6 @@
 {
   "name": "@handy-computer/recorder",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Cross-platform microphone capture for Node.js, Bun, and Deno: exact, ordered, fixed-size chunks of audio, with device loss and stalls reported.",
   "type": "module",
   "license": "MIT",
