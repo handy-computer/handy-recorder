@@ -80,6 +80,29 @@ test("a throwing onChunk is an ordinary uncaught exception", async () => {
   assert.match(result.stderr, /boom from onChunk/);
 });
 
+test("a log handler does not keep the process alive", async () => {
+  const result = await fixture("log-idle");
+  ok(result);
+  assert.match(result.stdout, /opened/);
+  assert.ok(result.ms < 5_000, `took ${Math.round(result.ms)} ms to exit`);
+});
+
+test("a throwing log handler is an ordinary uncaught exception", async () => {
+  const result = await fixture("log-throws");
+  notCrashed(result);
+  assert.equal(result.timedOut, false);
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /boom from the log handler/);
+});
+
+test("a log handler whose worker exited is dropped harmlessly", async () => {
+  const result = await fixture("log-worker", { timeout: 20_000 });
+  ok(result);
+  assert.match(result.stdout, /worker logged [1-9]\d* records/);
+  assert.match(result.stdout, /main recorded [1-9]\d* samples with the worker's handler gone/);
+  assert.match(result.stdout, /main logged [1-9]\d* records/);
+});
+
 test("worker threads: record, and terminate one mid-recording", async () => {
   const result = await fixture("worker", { timeout: 20_000 });
   ok(result);

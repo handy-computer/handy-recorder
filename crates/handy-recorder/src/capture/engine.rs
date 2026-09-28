@@ -218,6 +218,7 @@ impl<S: Sink> Engine<S> {
         handler: Option<Handler>,
         timeouts: Timeouts,
     ) -> Result<Self, Error> {
+        let opening = Instant::now();
         timeouts.validate();
         validate_request(&config)?;
         let take_headset = config.take_headset;
@@ -247,7 +248,7 @@ impl<S: Sink> Engine<S> {
                                     "the platform finished opening a stream after open timed out; releasing it"
                                 );
                                 drop(stream);
-                                log::info!("released the late-opened stream");
+                                log::debug!("released the late-opened stream");
                                 return;
                             }
                             *state = OpenState::Done;
@@ -330,9 +331,10 @@ impl<S: Sink> Engine<S> {
         let delivery_thread = delivery.thread().id();
 
         log::info!(
-            "opened {} ({}) at {} Hz, {} ch; delivering {} Hz, {} ch, {}-frame chunks",
+            "opened {} ({}) in {} ms at {} Hz, {} ch; delivering {} Hz, {} ch, {}-frame chunks",
             info.device.name,
             info.device.backend,
+            opening.elapsed().as_millis(),
             info.device_format.sample_rate,
             info.device_format.channels,
             info.format.sample_rate,
@@ -830,12 +832,27 @@ fn supervise(
         if let Some(error) = shared.failure()
             && stream.is_some()
         {
-            log::error!("recorder failed: {error}");
+            log::log!(failure_level(&error), "recorder failed: {error}");
             teardown(stream);
             if let Some(handler) = handler.take() {
                 notify(handler, error);
             }
         }
+    }
+}
+
+/// The device or system changed and the recorder reported it: a warning.
+/// Anything else failing is a bug somewhere: an error.
+fn failure_level(error: &Error) -> log::Level {
+    match error.kind() {
+        ErrorKind::DeviceLost
+        | ErrorKind::StreamInvalidated
+        | ErrorKind::Stalled
+        | ErrorKind::NoAudio
+        | ErrorKind::PermissionDenied
+        | ErrorKind::DeviceUnavailable
+        | ErrorKind::DeviceBusy => log::Level::Warn,
+        _ => log::Level::Error,
     }
 }
 

@@ -48,12 +48,37 @@ const keepAlive = {
   },
 };
 
-// A throw from application code (onChunk, onFailure) must not unwind into
+// A throw from application code (onChunk, onFailure, a log handler) must not unwind into
 // the native dispatcher; rethrow it as an ordinary uncaught exception.
 function rethrowLater(error) {
   queueMicrotask(() => {
     throw error;
   });
+}
+
+const LOG_LEVELS = ["error", "warn", "info", "debug", "trace"];
+
+export function setLogHandler(handler, options = {}) {
+  if (handler !== null && typeof handler !== "function") {
+    throw new TypeError("handler must be a function or null");
+  }
+  if (options === null || typeof options !== "object") {
+    throw new TypeError("options must be an object");
+  }
+  const { level = "info" } = options;
+  if (!LOG_LEVELS.includes(level)) {
+    throw new TypeError(`level must be one of ${LOG_LEVELS.join(", ")}; got ${level}`);
+  }
+  const dispatch =
+    handler &&
+    ((record) => {
+      try {
+        handler(record);
+      } catch (error) {
+        rethrowLater(error);
+      }
+    });
+  native.setLogHandler(dispatch, level);
 }
 
 function misuse(code, message) {

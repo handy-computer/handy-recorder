@@ -284,6 +284,7 @@ name = "handy-recorder-node"
 version = "0.0.0"
 dependencies = [
  "handy-recorder",
+ "log",
  "napi",
  "napi-build",
  "napi-derive",

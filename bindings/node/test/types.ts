@@ -6,8 +6,10 @@ import {
   SPEECH,
   listInputDevices,
   permissionStatus,
+  setLogHandler,
   type AudioChunk,
   type InputDevice,
+  type LogRecord,
   type Permission,
   type Recording,
 } from "@handy-computer/recorder";
@@ -47,6 +49,15 @@ export function classify(error: unknown): string {
   return "other";
 }
 
+export function log(lines: string[]): void {
+  setLogHandler(({ level, target, message, timeMs }: LogRecord) => {
+    lines.push(`${new Date(timeMs).toISOString()} ${level} ${target} ${message}`);
+  }, { level: "debug" });
+  setLogHandler(null);
+}
+
+// @ts-expect-error: levels are the five names.
+setLogHandler(() => {}, { level: "verbose" });
 // @ts-expect-error: not constructible; use Recorder.open.
 new Recorder();
 // @ts-expect-error: channels is "all", "mono", or an index.

@@ -160,3 +160,31 @@ export function listInputDevices(): InputDevice[];
 
 /** Microphone permission. A synchronous read; never prompts. */
 export function permissionStatus(): Permission;
+
+export type LogLevel = "error" | "warn" | "info" | "debug" | "trace";
+
+/** A line from the native library's log, delivered to `setLogHandler`'s handler. */
+export interface LogRecord {
+  level: LogLevel;
+  /** The Rust module that wrote it, e.g. `handy_recorder::capture::engine`. */
+  target: string;
+  message: string;
+  /**
+   * When it was written, in ms since the epoch (like `Date.now()`), not when
+   * it reached JavaScript: records written while the event loop is blocked
+   * arrive afterwards with their own times.
+   */
+  timeMs: number;
+}
+
+/**
+ * Sends the native library's log records at `level` and more severe (default
+ * `"info"`) to `handler`, in order, on the JavaScript thread. One handler per
+ * process: a later call replaces it, and `null` turns logging off. Up to 1024
+ * records wait for a busy event loop; past that they're dropped, and a `warn`
+ * record says how many. Never keeps the process alive.
+ */
+export function setLogHandler(
+  handler: ((record: LogRecord) => void) | null,
+  options?: { level?: LogLevel },
+): void;

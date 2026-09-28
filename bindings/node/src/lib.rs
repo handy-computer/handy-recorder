@@ -8,6 +8,9 @@
 //! recording arrives before the `stopped` event. Calls into JavaScript never
 //! wait for it; a busy event loop queues events, it doesn't stall the sink.
 //!
+//! The library's `log` records reach JavaScript the same way, through one
+//! process-wide handler (`logging`), stamped with when they were written.
+//!
 //! Tested from JavaScript (`test/`). napi doesn't register exports in a
 //! `cargo test` build, where they would all read as dead code.
 #![cfg_attr(test, allow(dead_code))]
@@ -15,6 +18,7 @@
 mod convert;
 #[cfg(feature = "test-backend")]
 mod fake;
+mod logging;
 mod recorder;
 
 use napi::Result;

@@ -24,6 +24,7 @@ await recorder.close();
 
 - `listInputDevices()` lists devices; pass an `id` as `device`.
 - `permissionStatus()` reads the microphone permission without prompting.
+- `setLogHandler(handler, { level })` sends the native library's log to you (default `info`), stamped with when each line was written. Nothing is logged without a handler.
 - Errors are `RecorderError`s. Match on `code`; `index.d.ts` says what to do for each.
 - `open` can take seconds (Bluetooth); `stop` and `close` can too when a device misbehaves. None of them block the event loop.
 - An idle open recorder doesn't keep the process alive; a running recording does, until stopped. Close recorders you're done with; each holds its device.

@@ -46,9 +46,8 @@ impl Watchdog {
             *checked_at = checked;
             // Failed under the lock: `stop` reads the same timestamp.
             if let Suspension::DuringRecording(gap) = suspended {
-                let error = suspended_during_recording(shared, gap, timeouts.stall);
-                log::warn!("watchdog tripped: {error}");
-                shared.fail(error);
+                // Logged by the device thread's loop, which runs this check.
+                shared.fail(suspended_during_recording(shared, gap, timeouts.stall));
             }
             (suspended, frozen)
         };
@@ -66,7 +65,7 @@ impl Watchdog {
         if callbacks != self.callbacks {
             if self.idle_stall_logged {
                 self.idle_stall_logged = false;
-                log::info!(
+                log::debug!(
                     "audio callbacks resumed after {:.1} s",
                     (now - self.last_callback_at).as_secs_f64()
                 );
@@ -110,7 +109,7 @@ impl Watchdog {
                     let silent = now - self.last_callback_at;
                     if silent >= timeouts.stall && !self.idle_stall_logged {
                         self.idle_stall_logged = true;
-                        log::info!(
+                        log::debug!(
                             "no audio callbacks for {:.1} s while idle (system sleep?); \
                              not a failure unless it lasts into a recording",
                             silent.as_secs_f64()
@@ -130,8 +129,8 @@ impl Watchdog {
                 ))
             })
         });
+        // Logged by the device thread's loop, which runs this check.
         if let Some(error) = error {
-            log::warn!("watchdog tripped: {error}");
             shared.fail(error);
         }
     }

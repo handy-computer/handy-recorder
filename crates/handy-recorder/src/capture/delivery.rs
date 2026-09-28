@@ -438,15 +438,21 @@ impl<S: Sink> Processor<S> {
             Some(error) => EndReason::RecorderFailed(error),
             None => EndReason::StopCalled,
         });
+        let summary = Summary {
+            elapsed: active.started.elapsed(),
+            first_chunk_after: active.first_chunk_after,
+            output_frames: active.output_frames,
+            overrun_episodes: active.overrun_episodes,
+        };
         let stopped = Stopped {
             sink: active.sink,
             end_reason,
             dropped_frames: active.dropped_frames,
         };
         log::debug!(
-            "recording stopped ({:?}) after {:?}: {} frames drained at {} Hz, {} frames delivered at {} Hz, \
+            "recording stopped ({}) after {:?}: {} frames drained at {} Hz, {} frames delivered at {} Hz, \
              {} dropped in {} overrun episodes, first chunk after {:?}",
-            stopped.end_reason,
+            end_reason_name(&stopped.end_reason),
             active.started.elapsed(),
             active.input_frames,
             self.in_sample_rate,
@@ -454,7 +460,7 @@ impl<S: Sink> Processor<S> {
             self.out_sample_rate,
             stopped.dropped_frames,
             active.overrun_episodes,
-            active.first_chunk_after,
+            active.first_chunk_after.unwrap_or_default(),
         );
         let rate = self.in_sample_rate as f64;
         if active.input_frames > 0 && !active.heard_nonzero {
@@ -463,7 +469,8 @@ impl<S: Sink> Processor<S> {
                 active.input_frames as f64 / rate
             );
         } else if longest_zero_run >= self.in_sample_rate as u64 {
-            log::warn!(
+            // Debug: noise-gated and Bluetooth mics send exact zeros between words.
+            log::debug!(
                 "the recording contained {:.1} s of exact digital silence: a muted device or a stalled stream",
                 longest_zero_run as f64 / rate
             );
@@ -476,14 +483,56 @@ impl<S: Sink> Processor<S> {
                  before the library received it, not counted in dropped_frames"
             );
         }
-        if !stopped.is_complete() {
-            log::warn!(
-                "incomplete recording: {:?}, {} frames dropped",
-                stopped.end_reason,
-                stopped.dropped_frames
-            );
-        }
+        log_summary(&stopped, &summary);
         Some(stopped)
+    }
+}
+
+/// What the one-line summary of a recording reports.
+struct Summary {
+    elapsed: Duration,
+    first_chunk_after: Option<Duration>,
+    output_frames: u64,
+    overrun_episodes: u32,
+}
+
+/// One line per recording: info when complete, warn when it ended early or
+/// dropped audio (the failure itself is logged where it happened).
+fn log_summary<S>(stopped: &Stopped<S>, summary: &Summary) {
+    let first = match summary.first_chunk_after {
+        Some(after) => format!("first audio after {} ms", after.as_millis()),
+        None => "no audio".to_owned(),
+    };
+    let dropped = if stopped.dropped_frames > 0 {
+        format!(
+            ", {} dropped in {} overruns",
+            stopped.dropped_frames, summary.overrun_episodes
+        )
+    } else {
+        String::new()
+    };
+    let details = format!("{first}, {} frames{dropped}", summary.output_frames);
+    let elapsed = summary.elapsed.as_secs_f64();
+    match &stopped.end_reason {
+        EndReason::StopCalled if stopped.dropped_frames == 0 => {
+            log::info!("recording stopped after {elapsed:.1} s: {details}");
+        }
+        EndReason::StopCalled => {
+            log::warn!("recording stopped after {elapsed:.1} s with audio dropped: {details}");
+        }
+        reason => {
+            let reason = end_reason_name(reason);
+            log::warn!("recording ended early after {elapsed:.1} s ({reason}): {details}");
+        }
+    }
+}
+
+/// `StopCalled`, the failure's kind (`DeviceLost`), or `SinkPanicked`.
+fn end_reason_name(reason: &EndReason) -> String {
+    match reason {
+        EndReason::StopCalled => "StopCalled".to_owned(),
+        EndReason::RecorderFailed(error) => format!("{:?}", error.kind()),
+        EndReason::SinkPanicked(_) => "SinkPanicked".to_owned(),
     }
 }
 
