@@ -1,6 +1,5 @@
-// Writes a steady 440 Hz sine as a 16-bit mono WAV, for CI to play into a
-// virtual device: `node tone.mjs <file> [seconds]` (default 300). One long
-// tone has no quiet gaps for a short recording to land in.
+// Writes a steady 440 Hz tone as a WAV for CI to play into a virtual device:
+// `node tone.mjs <file> [seconds]` (default 300), with no gaps to record.
 
 import { writeFileSync } from "node:fs";
 

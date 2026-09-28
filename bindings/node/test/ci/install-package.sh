@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
-# Installs a packed @handy-computer/recorder into a new project, with
-# install scripts off (as pi-voice's CI and many users have it), and copies
-# in the smoke test.
+# Installs the packed package into a new project, install scripts off, and
+# copies in the smoke test. "yarn" is Yarn Plug'n'Play: run with `yarn node`.
 #
-#   install-package.sh npm|pnpm|bun|yarn <tarball, or its directory> <project dir>
-#
-# yarn is Yarn Berry with Plug'n'Play: run the smoke test with `yarn node`.
+#   install-package.sh npm|pnpm|bun|yarn <tarball, or its folder> <project dir>
 set -euo pipefail
 
 installer=$1
+# Git Bash on Windows.
 if command -v cygpath >/dev/null; then set -- "$1" "$(cygpath -u "$2")" "$3"; fi
 if [ -d "$2" ]; then
     tarball=$(ls "$2"/*.tgz)

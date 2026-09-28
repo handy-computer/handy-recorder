@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
-# Runs inside a Linux container (see node.yml): installs the tarball with npm
-# and runs the smoke test, then checks the outcome is the expected one:
-#
-#   ok            it loads and works
-#   ok-or-alsa    it works, or fails to load with the hint to install ALSA
-#   no-prebuild   it fails cleanly: no prebuilt binary for this platform
+# In a Docker container: installs the package with npm, runs the smoke test,
+# and checks the outcome is <expect>: ok, alsa (the install-ALSA hint), or
+# no-prebuild.
 #
 #   distro-check.sh <expect> <tarball, or its directory>
 set -uo pipefail
@@ -31,7 +28,7 @@ fi
 
 case $expect in
     ok) [ $status -eq 0 ] ;;
-    ok-or-alsa) [ $status -eq 0 ] || grep -q "Install the ALSA library" <<<"$out" ;;
+    alsa) [ $status -ne 0 ] && grep -q "Install the ALSA library" <<<"$out" ;;
     no-prebuild) [ $status -ne 0 ] && grep -q "has no prebuilt binary for linux-.*-musl" <<<"$out" ;;
     *) echo "unknown expectation $expect" >&2; false ;;
 esac || { echo "expected: $expect" >&2; exit 1; }

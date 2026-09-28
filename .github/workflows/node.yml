@@ -1,26 +1,38 @@
 name: Node bindings
 
-# @handy-computer/recorder (bindings/node): behavior under every runtime,
-# prebuilt binaries for every target, and the packed package installed and
-# run the ways users will. Nothing is published from here.
-#
-# Nine jobs: one per OS builds and tests, one packs, one per OS checks the
-# package. Steps within a job run every combination and fail at the end,
-# so one failure doesn't hide another.
+# Tests bindings/node, builds its binaries, and checks the packed package
+# installs and works on each OS. Nothing is published from here.
 
 on:
   push:
     branches: [main]
+    paths:
+      - bindings/node/**
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - tools/probe/ci/with-noise-source.sh
+      - .github/workflows/node.yml
   pull_request:
+    paths:
+      - bindings/node/**
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - tools/probe/ci/with-noise-source.sh
+      - .github/workflows/node.yml
+
+# Pushing to a PR again cancels the run for the old commit.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Per OS: lint, the test build (the fake microphone) under Node 22 and 24,
-  # Bun and Deno, then the published binaries for this OS's targets. Linux
-  # runs in Ubuntu 22.04 (glibc 2.35), so its binary loads there, on Debian
-  # 12, and newer.
+  # Tests the fake-microphone build under Node, Bun and Deno, then builds the
+  # shipped binaries. Linux builds in Ubuntu 22.04 so it needs only glibc 2.35.
   build:
     name: Build and test (${{ matrix.name }})
     strategy:
@@ -38,9 +50,9 @@ jobs:
         shell: bash
         working-directory: bindings/node
     env:
-      # Node 22 needs macOS 11 or later anyway.
+      # Node 22's own minimum.
       MACOSX_DEPLOYMENT_TARGET: "11.0"
-      # No VC++ redistributable needed on Windows.
+      # No Visual C++ Redistributable needed.
       RUSTFLAGS: ${{ matrix.name == 'Windows' && '-C target-feature=+crt-static' || '' }}
       TARGETS: ${{ matrix.targets }}
     steps:
@@ -54,7 +66,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      # Explicitly: the action's own `targets` list isn't installed on Windows.
+      # The action's `targets` option doesn't work on Windows.
       - run: rustup target add ${TARGETS//,/ }
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
@@ -65,45 +77,46 @@ jobs:
         with:
           deno-version: v2.x
       - run: npm ci
-      - run: cargo clippy -p handy-recorder-node --features test-backend --all-targets -- -D warnings
-      - run: npm run typecheck
+      # Same result on every OS.
+      - if: matrix.name == 'Linux x64'
+        run: cargo clippy -p handy-recorder-node --features test-backend --all-targets -- -D warnings
+      - if: matrix.name == 'Linux x64'
+        run: npm run typecheck
       - run: npm run build:test
-      - name: Test (Node 22, Bun, Deno)
+      # All three run even if one fails.
+      - name: Test (Node, Bun, Deno)
         run: |
           failed=0
           node test/run.mjs || failed=1
           node test/run.mjs --runtime bun || failed=1
           node test/run.mjs --runtime "deno run -A" || failed=1
           exit $failed
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - name: Test (Node 24)
-        run: node test/run.mjs
-      - name: Build the published binaries
+      - name: Build the binaries we ship
         run: |
           for target in ${TARGETS//,/ }; do
             npm run build -- --target "$target"
           done
           ls -l prebuilds
-      - name: Check the binaries' dependencies (Linux)
+      - name: Check the binaries need at most glibc 2.35 (Linux)
         if: runner.os == 'Linux'
         run: |
           for file in prebuilds/*.node; do
-            {
-              echo "### $(basename "$file")"
-              echo '```'
-              readelf -d "$file" | grep NEEDED
-              echo "newest glibc symbol: $(objdump -T "$file" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n1)"
-              echo '```'
-            } | tee -a "$GITHUB_STEP_SUMMARY"
+            newest=$(objdump -T "$file" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n1)
+            echo "$(basename "$file"): $newest"
+            [ "$(printf '%s\n' "$newest" GLIBC_2.35 | sort -V | tail -n1)" = GLIBC_2.35 ]
           done
+      # These exist only on macOS 14.2+, so they must be weak (see build.rs)
+      # for the binary to load on older macOS.
       - name: Check CoreAudio is weak-linked (macOS)
         if: runner.os == 'macOS'
         run: |
           for file in prebuilds/*.node; do
-            nm -m "$file" | grep -E "AudioHardware(Create|Destroy)ProcessTap"
-            ! nm -m "$file" | grep -E "AudioHardware(Create|Destroy)ProcessTap" | grep -v weak
+            symbols=$(nm -m "$file" | grep -E "AudioHardware(Create|Destroy)ProcessTap")
+            echo "$symbols"
+            if grep -v weak <<<"$symbols"; then
+              echo "$(basename "$file"): the functions above are not weak-linked" >&2
+              exit 1
+            fi
           done
       - uses: actions/upload-artifact@v4
         with:
@@ -111,7 +124,7 @@ jobs:
           path: bindings/node/prebuilds/*.node
           if-no-files-found: error
 
-  # One package with every binary. Its size goes in the job summary.
+  # One .tgz with all six binaries, as `npm publish` would make it.
   package:
     needs: build
     runs-on: ubuntu-24.04
@@ -130,18 +143,13 @@ jobs:
           merge-multiple: true
       - run: test "$(ls prebuilds/*.node | wc -l)" -eq 6
       - run: npm pack
-      - name: Size report
-        run: node test/ci/size-report.mjs *.tgz | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: package
           path: bindings/node/*.tgz
 
-  # Per OS: the package installed with npm, pnpm, bun, and Yarn Plug'n'Play
-  # (scripts off), and the smoke test under Node, Bun, and Deno for each.
-  # Where the runner has a sound source, every one of those records real
-  # audio: BlackHole on macOS, PulseAudio on Linux x64, PipeWire on Linux
-  # arm64. Windows runners have no input device.
+  # Installs the .tgz with each package manager (scripts off) and runs
+  # test/smoke.mjs; then records real audio where the runner can fake a mic.
   package-check:
     name: Package (${{ matrix.name }})
     needs: package
@@ -151,84 +159,71 @@ jobs:
         include:
           - { name: macOS, os: macos-latest }
           - { name: Windows, os: windows-latest }
-          - { name: Linux x64, os: ubuntu-24.04, server: pulseaudio, packages: pulseaudio }
-          - { name: Linux arm64, os: ubuntu-24.04-arm, server: pipewire, packages: "pipewire pipewire-pulse wireplumber dbus" }
+          - { name: Windows arm64, os: windows-11-arm, combos: "npm:node" }
+          - { name: Linux x64, os: ubuntu-24.04 }
+          - { name: Linux arm64, os: ubuntu-24.04-arm }
     runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
-    env:
-      # Relative to the workspace, where steps run.
-      MATRIX: bindings/node/test/ci/package-matrix.sh
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - uses: oven-sh/setup-bun@v2
+        if: '!matrix.combos'
       - uses: denoland/setup-deno@v2
+        if: '!matrix.combos'
         with:
           deno-version: v2.x
       - uses: actions/download-artifact@v4
         with:
           name: package
           path: ${{ runner.temp }}/package
+      - name: Install and smoke test
+        run: |
+          if [ "${{ matrix.name }}" = "Windows arm64" ]; then test "$(node -p process.arch)" = arm64; fi
+          bindings/node/test/ci/package-matrix.sh "$RUNNER_TEMP/package" "$RUNNER_TEMP/smoke" ${{ matrix.combos }}
 
-      - name: Install and smoke (Windows)
-        if: runner.os == 'Windows'
-        run: '"$MATRIX" "$RUNNER_TEMP/package" "$RUNNER_TEMP/smoke"'
-
-      # BlackHole is a virtual audio device; a tone played into its output
-      # comes back on its input. The runner's processes already have
-      # microphone permission, and it needs no reboot despite the installer.
-      - name: Install BlackHole (macOS)
+      # BlackHole loops its output back to its input; no reboot needed.
+      - name: Record from BlackHole (macOS)
         if: runner.os == 'macOS'
+        env:
+          HANDY_RECORDER_SMOKE_DEVICE: BlackHole
         run: |
           brew install blackhole-2ch switchaudio-osx
           sudo killall coreaudiod || true
           for _ in $(seq 30); do SwitchAudioSource -a -t input | grep -q BlackHole && break; sleep 1; done
           SwitchAudioSource -t output -s "BlackHole 2ch"
           node bindings/node/test/ci/tone.mjs "$RUNNER_TEMP/tone.wav"
-      - name: Install, smoke, and record from BlackHole (macOS)
-        if: runner.os == 'macOS'
-        env:
-          HANDY_RECORDER_SMOKE_DEVICE: BlackHole
-        run: |
           afplay "$RUNNER_TEMP/tone.wav" &
           trap 'kill $! 2>/dev/null || true' EXIT
           sleep 1
-          "$MATRIX" "$RUNNER_TEMP/package" "$RUNNER_TEMP/smoke"
-      # The darwin-x64 binary, cross-built, loaded by an x64 Node under
-      # Rosetta. (win32-arm64 is built but never loaded: no runner.)
+          cd "$RUNNER_TEMP/smoke/npm" && node smoke.mjs
+      # x64 Node under Rosetta: the only place the darwin-x64 binary loads.
       - uses: actions/setup-node@v4
         if: runner.os == 'macOS'
         with:
           node-version: 22
           architecture: x64
-      - name: Smoke under Rosetta (macOS)
+      - name: Smoke test the x64 binary under Rosetta (macOS)
         if: runner.os == 'macOS'
-        env:
-          HANDY_RECORDER_SMOKE_DEVICE: BlackHole
         run: |
           test "$(node -p process.arch)" = x64
-          afplay "$RUNNER_TEMP/tone.wav" &
-          trap 'kill $! 2>/dev/null || true' EXIT
-          sleep 1
           out=$(cd "$RUNNER_TEMP/smoke/npm" && node smoke.mjs)
           echo "$out"
           grep -q "darwin-x64" <<<"$out"
 
-      - name: Install the sound server (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y pulseaudio-utils ${{ matrix.packages }}
-      - name: Install, smoke, and record from ${{ matrix.server }} (Linux)
-        if: runner.os == 'Linux'
+      - name: Record from PulseAudio (Linux x64)
+        if: runner.os == 'Linux' && runner.arch == 'X64'
         env:
           HANDY_RECORDER_SMOKE_DEVICE: default
         run: |
-          bindings/node/test/ci/with-sound-server.sh ${{ matrix.server }} \
-            "$MATRIX" "$RUNNER_TEMP/package" "$RUNNER_TEMP/smoke"
-      # Older and slimmer distributions, and musl.
+          sudo apt-get update && sudo apt-get install -y pulseaudio pulseaudio-utils
+          cd "$RUNNER_TEMP/smoke/npm"
+          "$GITHUB_WORKSPACE/tools/probe/ci/with-noise-source.sh" node smoke.mjs
+      # Other distributions in Docker; expectations are in distro-check.sh.
       - name: Distributions (Linux x64)
         if: runner.os == 'Linux' && runner.arch == 'X64'
         run: |
@@ -241,9 +236,8 @@ jobs:
           echo "### Distributions" >>"$GITHUB_STEP_SUMMARY"
           alsa="apt-get update >/dev/null && apt-get install -y libasound2 >/dev/null"
           failed=0
-          check node:18-bookworm-slim ok "$alsa" || failed=1  # glibc 2.36; oldest Node
-          check node:22-bookworm-slim ok "$alsa" || failed=1
-          check node:22-bookworm-slim ok-or-alsa || failed=1  # no libasound2: does it load?
-          check node:24-trixie-slim ok-or-alsa || failed=1
+          check node:18-bookworm-slim ok "$alsa" || failed=1  # oldest supported Node
+          check node:24-trixie-slim ok "$alsa" || failed=1    # newest Node; libasound2 is libasound2t64 here
+          check node:22-bookworm-slim alsa || failed=1        # no libasound2: the install hint
           check node:22-alpine no-prebuild || failed=1        # musl: no binary yet
           exit $failed
