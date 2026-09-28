@@ -124,7 +124,11 @@ test("loaded by a compiled Bun binary through jiti (pi's binary)", async () => {
     assert.match(result.stdout, /host: compiled true/);
     assert.match(result.stdout, /extension: [1-9]\d* samples, [1-9]\d* chunks, complete true/);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    // Windows can hold the exited binary for a moment. A leftover temp
+    // directory isn't a test failure.
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    } catch {}
   }
 }, { timeout: 60_000, skip: !process.versions.bun && "runs under Bun only" });
 

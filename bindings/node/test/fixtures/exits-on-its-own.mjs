@@ -8,18 +8,22 @@ import { SPEECH, fedMic, native, openFake, sleep } from "./common.mjs";
 setLogHandler(() => {}, { level: "debug" });
 console.log("log handler set");
 
-const fake = new native.FakeMic(16_000, 1, 200);
-fake.failNextOpen("DeviceBusy");
-await openFake(fake, SPEECH).catch((e) => console.log(`open failed: ${e.code}`));
+// A fake per step: a timed-out open's stream starts late, once released, and
+// the fake runs one stream at a time.
+const busy = new native.FakeMic(16_000, 1, 200);
+busy.failNextOpen("DeviceBusy");
+await openFake(busy, SPEECH).catch((e) => console.log(`open failed: ${e.code}`));
 
-fake.hangNextStart();
-await openFake(fake, SPEECH).catch((e) => console.log(`open failed: ${e.code}`));
-fake.releaseStart();
+const slow = new native.FakeMic(16_000, 1, 200);
+slow.hangNextStart();
+await openFake(slow, SPEECH).catch((e) => console.log(`open failed: ${e.code}`));
+slow.releaseStart();
 
-const closing = await openFake(fake, SPEECH);
-fake.hangTeardown();
+const stuck = new native.FakeMic(16_000, 1, 200);
+const closing = await openFake(stuck, SPEECH);
+stuck.hangTeardown();
 await closing.close().catch((e) => console.log(`close failed: ${e.code}`));
-fake.releaseTeardown();
+stuck.releaseTeardown();
 
 const fed = fedMic();
 const recorder = await openFake(fed, SPEECH);
