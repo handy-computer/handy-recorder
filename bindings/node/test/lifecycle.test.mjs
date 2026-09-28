@@ -26,10 +26,10 @@ function notCrashed(result) {
   );
 }
 
-test("an idle open recorder does not keep the process alive", async () => {
-  const result = await fixture("idle-open");
+test("nothing left behind keeps the process alive", async () => {
+  const result = await fixture("exits-on-its-own");
   ok(result);
-  assert.match(result.stdout, /opened/);
+  assert.match(result.stdout, /open failed: DeviceBusy\nopen failed: OpenTimedOut\nclose failed: CloseTimedOut\nrecorded 20 times/);
   assert.ok(result.ms < 5_000, `took ${Math.round(result.ms)} ms to exit`);
 });
 
@@ -69,31 +69,20 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
     notCrashed(result);
     assert.equal(result.timedOut, false, "hung after the signal");
     assert.match(result.stdout, /ready [1-9]/);
+    // Killed by the signal, not exited on its own before it arrived.
+    assert.ok(result.signal === signal || result.code !== 0, `exit ${result.code ?? result.signal}`);
   }, { skip: windows && "no POSIX signals on Windows" });
 }
 
-test("a throwing onChunk is an ordinary uncaught exception", async () => {
-  const result = await fixture("chunk-throws");
-  notCrashed(result);
-  assert.equal(result.timedOut, false);
-  assert.notEqual(result.code, 0);
-  assert.match(result.stderr, /boom from onChunk/);
-});
-
-test("a log handler does not keep the process alive", async () => {
-  const result = await fixture("log-idle");
-  ok(result);
-  assert.match(result.stdout, /opened/);
-  assert.ok(result.ms < 5_000, `took ${Math.round(result.ms)} ms to exit`);
-});
-
-test("a throwing log handler is an ordinary uncaught exception", async () => {
-  const result = await fixture("log-throws");
-  notCrashed(result);
-  assert.equal(result.timedOut, false);
-  assert.notEqual(result.code, 0);
-  assert.match(result.stderr, /boom from the log handler/);
-});
+for (const [mode, message] of [["chunk", /boom from onChunk/], ["log", /boom from the log handler/]]) {
+  test(`a throwing ${mode === "chunk" ? "onChunk" : "log handler"} is an ordinary uncaught exception`, async () => {
+    const result = await fixture("throws", { args: [mode] });
+    notCrashed(result);
+    assert.equal(result.timedOut, false);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, message);
+  });
+}
 
 test("a log handler whose worker exited is dropped harmlessly", async () => {
   const result = await fixture("log-worker", { timeout: 20_000 });
@@ -119,14 +108,14 @@ test("loaded through jiti, reloaded while recording (as pi does)", async () => {
 });
 
 // pi also ships as a `bun build --compile` binary, which loads extensions
-// from disk through jiti. Needs `bun` on PATH; runs under every runtime.
-const bun = spawnSync("bun", ["--version"], { encoding: "utf8" });
+// from disk through jiti. The result doesn't depend on the runtime running
+// these tests, so it runs once, under Bun.
 test("loaded by a compiled Bun binary through jiti (pi's binary)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "handy-recorder-pi-host-"));
   try {
     const host = join(dir, process.platform === "win32" ? "pi-host.exe" : "pi-host");
     const fixtures = fileURLToPath(new URL("./fixtures/", import.meta.url));
-    const build = spawnSync("bun", ["build", "--compile", join(fixtures, "pi-host.mjs"), "--outfile", host], {
+    const build = spawnSync(process.execPath, ["build", "--compile", join(fixtures, "pi-host.mjs"), "--outfile", host], {
       encoding: "utf8",
     });
     assert.equal(build.status, 0, build.stderr);
@@ -137,6 +126,6 @@ test("loaded by a compiled Bun binary through jiti (pi's binary)", async () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-}, { timeout: 60_000, skip: bun.status !== 0 && "bun is not on PATH" });
+}, { timeout: 60_000, skip: !process.versions.bun && "runs under Bun only" });
 
 await run();

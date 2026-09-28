@@ -3,18 +3,7 @@
 // afterwards receives records.
 import { Worker, isMainThread, parentPort } from "node:worker_threads";
 import { setLogHandler } from "../../index.js";
-import { SPEECH, fedMic, openFake, sleep } from "./common.mjs";
-
-async function record() {
-  const fake = fedMic();
-  const recorder = await openFake(fake, SPEECH);
-  recorder.start();
-  await sleep(100);
-  const recording = await recorder.stop();
-  await recorder.close();
-  fake.stopFeeding();
-  return recording.samples.length;
-}
+import { record, sleep } from "./common.mjs";
 
 if (isMainThread) {
   const worker = new Worker(new URL(import.meta.url));
@@ -25,7 +14,7 @@ if (isMainThread) {
   await new Promise((resolve) => worker.once("exit", resolve));
   console.log(`worker logged ${worked} records`);
 
-  console.log(`main recorded ${await record()} samples with the worker's handler gone`);
+  console.log(`main recorded ${(await record()).samples.length} samples with the worker's handler gone`);
   let records = 0;
   setLogHandler(() => records++);
   await record();

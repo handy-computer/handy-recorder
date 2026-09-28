@@ -1,7 +1,7 @@
 // Recorders inside worker threads: one records and reports back; another is
 // terminated mid-recording. The main thread must carry on unharmed.
 import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
-import { SPEECH, fedMic, openFake, sleep } from "./common.mjs";
+import { SPEECH, fedMic, openFake, record, sleep } from "./common.mjs";
 
 if (isMainThread) {
   const run = (mode) => new Worker(new URL(import.meta.url), { workerData: mode });
@@ -23,25 +23,14 @@ if (isMainThread) {
   console.log("terminated a worker mid-recording");
 
   // The main thread still records.
-  const fake = fedMic();
-  const recorder = await openFake(fake, SPEECH);
+  console.log(`main recorded ${(await record(200)).samples.length} samples`);
+} else if (workerData === "terminate") {
+  const recorder = await openFake(fedMic(), SPEECH);
   recorder.start();
   await sleep(200);
-  const recording = await recorder.stop();
-  await recorder.close();
-  fake.stopFeeding();
-  console.log(`main recorded ${recording.samples.length} samples`);
+  parentPort.postMessage("recording");
+  // The recording keeps this worker alive until it is terminated.
 } else {
-  const fake = fedMic();
-  const recorder = await openFake(fake, SPEECH);
-  recorder.start();
-  await sleep(200);
-  if (workerData === "terminate") {
-    parentPort.postMessage("recording");
-    await sleep(60_000);
-  }
-  const recording = await recorder.stop();
-  await recorder.close();
-  fake.stopFeeding();
+  const recording = await record(200);
   parentPort.postMessage({ samples: recording.samples.length, complete: recording.complete });
 }

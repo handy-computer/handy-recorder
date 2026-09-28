@@ -29,4 +29,3 @@ await Promise.all([firstRecorder.close(), secondRecorder.close()]);
 firstFake.stopFeeding();
 secondFake.stopFeeding();
 console.log(`first ${a.samples.length} complete ${a.complete}; second ${b.samples.length} complete ${b.complete}`);
-console.log(`errors are the same class: ${second.RecorderError === first.RecorderError}`);

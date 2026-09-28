@@ -40,8 +40,6 @@ export async function run() {
   process.exit(failed ? 1 : 0);
 }
 
-export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
 /** Blocks the event loop, as a slow render or a synchronous native call does. */
 export function busy(ms) {
   const end = performance.now() + ms;
@@ -65,7 +63,8 @@ export const runtimeName = process.versions.bun
  * Runs `test/fixtures/<name>.mjs` in a new process of this runtime. Resolves
  * with its exit code, signal, output, and how long it ran; kills it after
  * `timeout` ms (`timedOut` is then true). With `signalOnReady`, sends that
- * signal once the fixture prints "ready".
+ * signal 200 ms after the fixture prints "ready", time enough for it to have
+ * exited if nothing kept it alive.
  */
 export function fixture(name, { args = [], timeout = 10_000, env = {}, signalOnReady } = {}) {
   const file = fileURLToPath(new URL(`./fixtures/${name}.mjs`, import.meta.url));
@@ -81,7 +80,8 @@ export function fixture(name, { args = [], timeout = 10_000, env = {}, signalOnR
     child.stdout.on("data", (d) => {
       stdout += d;
       if (signalOnReady && stdout.includes("ready")) {
-        child.kill(signalOnReady);
+        const signal = signalOnReady;
+        setTimeout(() => child.kill(signal), 200);
         signalOnReady = undefined;
       }
     });

@@ -2,19 +2,12 @@
 // (`npm run build:test`), loaded through HANDY_RECORDER_NATIVE.
 
 import assert from "node:assert/strict";
-import { Recorder, RecorderError, SPEECH, __testing } from "../index.js";
-import { assertRamp, busy, run, runtimeName, sleep, test } from "./harness.mjs";
+import { Recorder, RecorderError } from "../index.js";
+import { SPEECH, fedMic, native, openFake, sleep } from "./fixtures/common.mjs";
+import { assertRamp, busy, run, runtimeName, test } from "./harness.mjs";
 
-const { native, openFake } = __testing;
 if (!native.FakeMic) throw new Error("this suite needs the test build (npm run build:test)");
 console.log(`# recording (${runtimeName})`);
-
-// 10 ms blocks, as a real device delivers them.
-function mic(sampleRate = 16_000, channels = 1, openTimeoutMs) {
-  const fake = new native.FakeMic(sampleRate, channels, openTimeoutMs);
-  fake.startFeeding(sampleRate / 100, 10);
-  return fake;
-}
 
 async function rejects(promise, code) {
   const error = await promise.then(
@@ -41,7 +34,7 @@ function throws(fn, code) {
 }
 
 test("opens and reports what it opened", async () => {
-  const fake = mic(48_000, 2);
+  const fake = fedMic(48_000, 2);
   const recorder = await openFake(fake, SPEECH);
   assert.equal(recorder.info.device.name, "Fake Mic");
   assert.deepEqual(recorder.info.deviceFormat, { sampleRate: 48_000, channels: 2 });
@@ -52,7 +45,7 @@ test("opens and reports what it opened", async () => {
 });
 
 test("a recording is complete and in order, and chunks add up to it", async () => {
-  const fake = mic();
+  const fake = fedMic();
   const chunks = [];
   const recorder = await openFake(fake, { ...SPEECH, onChunk: (chunk) => chunks.push(chunk) });
   const fedBefore = fake.framesFed;
@@ -83,7 +76,7 @@ test("a recording is complete and in order, and chunks add up to it", async () =
 });
 
 test("a blocked event loop loses no audio", async () => {
-  const fake = mic();
+  const fake = fedMic();
   let chunks = 0;
   const recorder = await openFake(fake, { ...SPEECH, onChunk: () => chunks++ });
   const fedBefore = fake.framesFed;
@@ -117,7 +110,7 @@ test("the event loop keeps running while a slow device opens", async () => {
 });
 
 test("channel selection and pass-through are exact", async () => {
-  const fake = mic(16_000, 2);
+  const fake = fedMic(16_000, 2);
   for (const [channels, expected] of [["all", 2], ["mono", 1], [1, 1]]) {
     const recorder = await openFake(fake, { channels });
     assert.equal(recorder.info.format.channels, expected);
@@ -132,7 +125,7 @@ test("channel selection and pass-through are exact", async () => {
 });
 
 test("resampling delivers the requested rate", async () => {
-  const fake = mic(48_000, 2);
+  const fake = fedMic(48_000, 2);
   const recorder = await openFake(fake, SPEECH);
   recorder.start();
   const fedBefore = fake.framesFed;
@@ -149,7 +142,7 @@ test("resampling delivers the requested rate", async () => {
 });
 
 test("collect: false still delivers chunks", async () => {
-  const fake = mic();
+  const fake = fedMic();
   let frames = 0;
   const recorder = await openFake(fake, {
     ...SPEECH,
@@ -165,20 +158,6 @@ test("collect: false still delivers chunks", async () => {
   await recorder.close();
 });
 
-test("many recordings on one recorder", async () => {
-  const fake = mic();
-  const recorder = await openFake(fake, SPEECH);
-  for (let i = 0; i < 20; i++) {
-    recorder.start();
-    await sleep(30);
-    const recording = await recorder.stop();
-    assert.equal(recording.complete, true);
-    if (recording.samples.length > 0) assertRamp(recording.samples, fake.ramp);
-  }
-  fake.stopFeeding();
-  await recorder.close();
-});
-
 test("an empty recording", async () => {
   const fake = new native.FakeMic(16_000, 1);
   const recorder = await openFake(fake, SPEECH);
@@ -190,7 +169,7 @@ test("an empty recording", async () => {
 });
 
 test("misuse: double start, stop when idle, use after close", async () => {
-  const fake = mic();
+  const fake = fedMic();
   const recorder = await openFake(fake, SPEECH);
   await rejects(recorder.stop(), "NotRecording");
   recorder.start();
@@ -251,7 +230,7 @@ test("open times out on a device that never starts", async () => {
 });
 
 test("a device lost mid-recording: failure event, audio kept, recorder stays failed", async () => {
-  const fake = mic();
+  const fake = fedMic();
   const failures = [];
   const recorder = await openFake(fake, { ...SPEECH, onFailure: (e) => failures.push(e) });
   recorder.start();
@@ -276,7 +255,7 @@ test("a device lost mid-recording: failure event, audio kept, recorder stays fai
 });
 
 test("close discards an unstopped recording", async () => {
-  const fake = mic();
+  const fake = fedMic();
   const recorder = await openFake(fake, SPEECH);
   recorder.start();
   await sleep(100);
@@ -287,7 +266,7 @@ test("close discards an unstopped recording", async () => {
 });
 
 test("close during stop waits for the stop, and every chunk still arrives", async () => {
-  const fake = mic();
+  const fake = fedMic();
   let frames = 0;
   const recorder = await openFake(fake, { ...SPEECH, onChunk: ({ samples }) => (frames += samples.length) });
   recorder.start();
@@ -321,7 +300,7 @@ test("asyncDispose closes", async () => {
 });
 
 test("several recorders at once", async () => {
-  const fakes = [mic(), mic(48_000, 2), mic(44_100, 1)];
+  const fakes = [fedMic(), fedMic(48_000, 2), fedMic(44_100, 1)];
   const recorders = await Promise.all(fakes.map((fake) => openFake(fake, SPEECH)));
   for (const recorder of recorders) recorder.start();
   await sleep(300);
