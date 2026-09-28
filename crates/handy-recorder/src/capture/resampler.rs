@@ -1,4 +1,7 @@
-use rubato::{FftFixedIn, ResampleError, Resampler, ResamplerConstructionError};
+use rubato::audioadapter_buffers::direct::{InterleavedSlice, SequentialSlice};
+use rubato::{
+    Fft, FixedSync, Indexing, ResampleError, Resampler, ResamplerConstructionError, WindowFunction,
+};
 use std::fmt;
 
 const RESAMPLER_CHUNK_SIZE: usize = 1024;
@@ -37,13 +40,13 @@ impl From<ResampleError> for ResamplerError {
 /// Resamples interleaved K-channel audio into fixed-size chunks, emitted as
 /// `(samples, valid frames)`. Only the final chunk is zero-padded.
 pub struct FrameResampler {
-    resampler: Option<FftFixedIn<f32>>,
+    resampler: Option<Fft<f32>>,
     channels: usize,
     chunk_in: usize,
-    /// Input frames waiting for a full resampler chunk, one buffer per channel.
-    in_buf: Vec<Vec<f32>>,
-    /// Scratch for interleaving multichannel resampler output.
-    interleaved: Vec<f32>,
+    /// Interleaved input frames waiting for a full resampler chunk.
+    in_buf: Vec<f32>,
+    /// Interleaved resampler output, sized for the largest chunk.
+    out_buf: Vec<f32>,
     frames_per_chunk: usize,
     /// Interleaved output frames waiting for a full chunk.
     pending: Vec<f32>,
@@ -66,20 +69,32 @@ impl FrameResampler {
 
         let chunk_in = RESAMPLER_CHUNK_SIZE;
 
+        // One FFT block per chunk and the BlackmanHarris2 window, as rubato
+        // 0.16's `FftFixedIn` with one sub-chunk; `Fft::new` would pick
+        // smaller blocks, changing the delay and the anti-aliasing cutoff.
         let resampler = if in_hz != out_hz {
-            Some(FftFixedIn::<f32>::new(
-                in_hz, out_hz, chunk_in, 1, channels,
-            )?)
+            let r = Fft::<f32>::new_custom(
+                in_hz,
+                out_hz,
+                chunk_in,
+                1,
+                channels,
+                WindowFunction::BlackmanHarris2,
+                FixedSync::Input,
+            )?;
+            debug_assert_eq!(r.input_frames_next(), chunk_in);
+            Some(r)
         } else {
             None
         };
+        let out_frames = resampler.as_ref().map_or(0, |r| r.output_frames_max());
 
         Ok(Self {
             resampler,
             channels,
             chunk_in,
-            in_buf: vec![Vec::with_capacity(chunk_in); channels],
-            interleaved: Vec::new(),
+            in_buf: Vec::with_capacity(chunk_in * channels),
+            out_buf: vec![0.0; out_frames * channels],
             frames_per_chunk,
             pending: Vec::with_capacity(frames_per_chunk * channels),
             in_hz,
@@ -107,27 +122,16 @@ impl FrameResampler {
         }
         self.in_count += src.len() / self.channels;
 
+        let chunk_samples = self.chunk_in * self.channels;
         while !src.is_empty() {
-            let space = self.chunk_in - self.in_buf[0].len();
-            let take = space.min(src.len() / self.channels);
-            if self.channels == 1 {
-                self.in_buf[0].extend_from_slice(&src[..take]);
-            } else {
-                for frame in src[..take * self.channels].chunks_exact(self.channels) {
-                    for (buf, &sample) in self.in_buf.iter_mut().zip(frame) {
-                        buf.push(sample);
-                    }
-                }
-            }
-            src = &src[take * self.channels..];
+            let take = (chunk_samples - self.in_buf.len()).min(src.len());
+            self.in_buf.extend_from_slice(&src[..take]);
+            src = &src[take..];
 
-            if self.in_buf[0].len() == self.chunk_in {
-                let result = self.resampler.as_mut().unwrap().process(&self.in_buf, None);
-                self.clear_input();
-                let out = result?;
-                let frames = out[0].len();
+            if self.in_buf.len() == chunk_samples {
+                let frames = self.process()?;
                 self.out_count += frames;
-                self.emit_planar(&out, frames, &mut emit);
+                self.emit_output(frames, &mut emit);
             }
         }
         Ok(())
@@ -156,31 +160,21 @@ impl FrameResampler {
         let expected = self.in_count * self.out_hz / self.in_hz + delay;
 
         // Keep only real output; the internal padding is synthetic.
-        if !self.in_buf[0].is_empty() {
-            let result = self
-                .resampler
-                .as_mut()
-                .unwrap()
-                .process_partial(Some(&self.in_buf), None);
-            self.clear_input();
-            let out = result?;
-            let take = expected.saturating_sub(self.out_count).min(out[0].len());
+        if !self.in_buf.is_empty() {
+            let frames = self.process()?;
+            let take = expected.saturating_sub(self.out_count).min(frames);
             self.out_count += take;
-            self.emit_planar(&out, take, emit);
+            self.emit_output(take, emit);
         }
 
         // Feed zeros until all real audio is out.
         let mut rounds = 0;
         while self.out_count < expected && rounds < MAX_TAIL_ROUNDS {
             rounds += 1;
-            let out = self
-                .resampler
-                .as_mut()
-                .unwrap()
-                .process_partial::<Vec<f32>>(None, None)?;
-            let take = (expected - self.out_count).min(out[0].len());
+            let frames = self.process()?;
+            let take = (expected - self.out_count).min(frames);
             self.out_count += take;
-            self.emit_planar(&out, take, emit);
+            self.emit_output(take, emit);
         }
         if self.out_count < expected {
             return Err(ResamplerError::TailIncomplete {
@@ -193,7 +187,7 @@ impl FrameResampler {
 
     /// Clears all state between recordings, so no audio leaks into the next.
     pub fn reset(&mut self) {
-        self.clear_input();
+        self.in_buf.clear();
         self.pending.clear();
         self.in_count = 0;
         self.out_count = 0;
@@ -202,28 +196,34 @@ impl FrameResampler {
         }
     }
 
-    fn clear_input(&mut self) {
-        for buf in &mut self.in_buf {
-            buf.clear();
-        }
+    /// Resamples and clears `in_buf`, which the resampler zero-pads to a
+    /// whole chunk. Returns the frames written to `out_buf`.
+    fn process(&mut self) -> Result<usize, ResampleError> {
+        let resampler = self.resampler.as_mut().unwrap();
+        let in_frames = self.in_buf.len() / self.channels;
+        let out_frames = self.out_buf.len() / self.channels;
+        let indexing = Some(Indexing::new().partial_len(in_frames));
+        // Mono is laid out the same either way; the sequential adapter copies
+        // whole slices, where the interleaved one copies sample by sample.
+        let result = if self.channels == 1 {
+            let input = SequentialSlice::new(&self.in_buf, 1, in_frames).unwrap();
+            let mut output = SequentialSlice::new_mut(&mut self.out_buf, 1, out_frames).unwrap();
+            resampler.process_into_buffer(&input, &mut output, indexing.as_ref())
+        } else {
+            let input = InterleavedSlice::new(&self.in_buf, self.channels, in_frames).unwrap();
+            let mut output =
+                InterleavedSlice::new_mut(&mut self.out_buf, self.channels, out_frames).unwrap();
+            resampler.process_into_buffer(&input, &mut output, indexing.as_ref())
+        };
+        self.in_buf.clear();
+        Ok(result?.1)
     }
 
-    /// Emits the first `frames` frames of planar resampler output.
-    fn emit_planar(
-        &mut self,
-        out: &[Vec<f32>],
-        frames: usize,
-        emit: &mut impl FnMut(&[f32], usize),
-    ) {
-        if self.channels == 1 {
-            self.emit_frames(&out[0][..frames], emit);
-            return;
-        }
-        let mut interleaved = std::mem::take(&mut self.interleaved);
-        interleaved.clear();
-        interleaved.extend((0..frames).flat_map(|i| out.iter().map(move |ch| ch[i])));
-        self.emit_frames(&interleaved, emit);
-        self.interleaved = interleaved;
+    /// Emits the first `frames` frames of `out_buf`.
+    fn emit_output(&mut self, frames: usize, emit: &mut impl FnMut(&[f32], usize)) {
+        let out = std::mem::take(&mut self.out_buf);
+        self.emit_frames(&out[..frames * self.channels], emit);
+        self.out_buf = out;
     }
 
     fn emit_frames(&mut self, mut data: &[f32], emit: &mut impl FnMut(&[f32], usize)) {
