@@ -311,10 +311,11 @@ impl<S: Sink> Engine<S> {
                     // Sink panics are caught per chunk, so this one is ours.
                     let run = AssertUnwindSafe(|| delivery::run(pipeline, &shared, delivery_rx));
                     if let Err(payload) = catch_unwind(run) {
-                        let error = shared.fail(shared.error(ErrorKind::Processing).with_detail(
-                            format!("the delivery thread panicked: {}", panic_message(&*payload)),
-                        ));
-                        log::error!("recorder failed: {error}");
+                        // Logged by the device thread's loop.
+                        shared.fail(shared.error(ErrorKind::Processing).with_detail(format!(
+                            "the delivery thread panicked: {}",
+                            panic_message(&*payload)
+                        )));
                     }
                 })
         };
@@ -832,27 +833,12 @@ fn supervise(
         if let Some(error) = shared.failure()
             && stream.is_some()
         {
-            log::log!(failure_level(&error), "recorder failed: {error}");
+            log::log!(error.kind().failure_level(), "recorder failed: {error}");
             teardown(stream);
             if let Some(handler) = handler.take() {
                 notify(handler, error);
             }
         }
-    }
-}
-
-/// The device or system changed and the recorder reported it: a warning.
-/// Anything else failing is a bug somewhere: an error.
-fn failure_level(error: &Error) -> log::Level {
-    match error.kind() {
-        ErrorKind::DeviceLost
-        | ErrorKind::StreamInvalidated
-        | ErrorKind::Stalled
-        | ErrorKind::NoAudio
-        | ErrorKind::PermissionDenied
-        | ErrorKind::DeviceUnavailable
-        | ErrorKind::DeviceBusy => log::Level::Warn,
-        _ => log::Level::Error,
     }
 }
 

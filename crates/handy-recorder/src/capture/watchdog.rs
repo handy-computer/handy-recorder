@@ -151,9 +151,8 @@ pub(super) fn fail_if_suspended(shared: &Shared, timeouts: &Timeouts) {
         recording_since,
         timeouts.stall,
     ) {
-        let error = suspended_during_recording(shared, gap, timeouts.stall);
-        log::warn!("{error}");
-        shared.fail(error);
+        // Logged by the device thread's loop.
+        shared.fail(suspended_during_recording(shared, gap, timeouts.stall));
     }
 }
 
