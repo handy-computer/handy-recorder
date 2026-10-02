@@ -136,38 +136,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cpal"
-version = "0.18.2"
-source = "git+https://github.com/handy-computer/cpal?rev=053b6f6a62d428b65b586f80079ba34d0cbf5fb1#053b6f6a62d428b65b586f80079ba34d0cbf5fb1"
-dependencies = [
- "alsa",
- "block2",
- "coreaudio-rs",
- "dasp_sample",
- "futures",
- "jni",
- "js-sys",
- "libc",
- "mach2",
- "ndk",
- "ndk-context",
- "num-derive",
- "num-traits",
- "objc2",
- "objc2-audio-toolbox",
- "objc2-avf-audio",
- "objc2-core-audio",
- "objc2-core-audio-types",
- "objc2-core-foundation",
- "objc2-foundation",
- "portable-atomic",
- "pulseaudio",
- "web-sys",
- "windows",
- "windows-core",
-]
-
-[[package]]
 name = "ctor"
 version = "1.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -295,12 +263,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "handy-cpal"
+version = "0.18.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07b0f0a55e498d0260eae6bc9a61a976b60d0c014c038771d6fbcc95907b79d4"
+dependencies = [
+ "alsa",
+ "block2",
+ "coreaudio-rs",
+ "dasp_sample",
+ "futures",
+ "jni",
+ "js-sys",
+ "libc",
+ "mach2",
+ "ndk",
+ "ndk-context",
+ "num-derive",
+ "num-traits",
+ "objc2",
+ "objc2-audio-toolbox",
+ "objc2-avf-audio",
+ "objc2-core-audio",
+ "objc2-core-audio-types",
+ "objc2-core-foundation",
+ "objc2-foundation",
+ "portable-atomic",
+ "pulseaudio",
+ "web-sys",
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "handy-recorder"
 version = "0.1.0"
 dependencies = [
- "cpal",
  "dasp_sample",
  "futures",
+ "handy-cpal",
  "libc",
  "log",
  "objc2-av-foundation",
@@ -327,7 +328,7 @@ dependencies = [
 name = "handy-recorder-probe"
 version = "0.0.0"
 dependencies = [
- "cpal",
+ "handy-cpal",
  "handy-recorder",
  "log",
 ]
