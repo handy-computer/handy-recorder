@@ -12,7 +12,7 @@ Opens a mic at whatever format the OS has it set to, and hands your code fixed-s
 
 ```toml
 [dependencies]
-handy-recorder = { git = "https://github.com/handy-computer/handy-recorder" }
+handy-recorder = "0.1"
 ```
 
 ```rust

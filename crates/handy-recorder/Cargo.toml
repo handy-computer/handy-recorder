@@ -2,9 +2,13 @@
 name = "handy-recorder"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 description = "Cross-platform microphone capture: exact, ordered, framed audio on an ordinary thread."
 license = "MIT"
-publish = false
+repository = "https://github.com/handy-computer/handy-recorder"
+readme = "../../README.md"
+keywords = ["audio", "microphone", "recording", "capture", "speech"]
+categories = ["multimedia::audio"]
 
 [features]
 # A deterministic fake microphone, for bindings' own test suites (`testing`).
@@ -20,21 +24,15 @@ rtrb = "0.4.0"
 # Pinned so resampled output never changes with a dependency bump.
 rubato = "=5.0.0"
 
-# CPAL 0.18.2 plus one fix, until a CPAL release has it: a fixed-size
-# PulseAudio record stream's buffer is no longer capped at one fragment,
-# which stalled it on PulseAudio and starved a second stream on one
-# connection under pipewire-pulse (RustAudio/cpal#1387).
-# Branch `pulseaudio-record-max-length` of handy-computer/cpal; only the
-# PulseAudio host differs from 0.18.2. A git dependency rather than a
-# `[patch]`, so that crates depending on this one get the fix too.
+# Temporary fork until upstream merges https://github.com/RustAudio/cpal/pull/1387.
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-cpal = { git = "https://github.com/handy-computer/cpal", rev = "053b6f6a62d428b65b586f80079ba34d0cbf5fb1" }
+cpal = { package = "handy-cpal", version = "=0.18.2" }
 
 # The native PulseAudio host (also serves pipewire-pulse), with ALSA fallback.
 # `pulseaudio` and `futures` (the versions cpal's host uses) watch that the
 # opened source still exists; `libc` reads CLOCK_BOOTTIME.
 [target.'cfg(target_os = "linux")'.dependencies]
-cpal = { git = "https://github.com/handy-computer/cpal", rev = "053b6f6a62d428b65b586f80079ba34d0cbf5fb1", features = ["pulseaudio"] }
+cpal = { package = "handy-cpal", version = "=0.18.2", features = ["pulseaudio"] }
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 libc = "0.2"
 pulseaudio = "0.3"
