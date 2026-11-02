@@ -415,9 +415,9 @@ impl OpenDevice for CpalOpenDevice {
         }
         #[cfg(target_os = "windows")]
         {
-            // Reserve für in Schüben eintreffendes RDP-Audio; Callbacks folgen
-            // weiterhin der Geräteperiode. Nicht auf den gemeldeten Pufferbereich
-            // begrenzen: Remote Audio meldet dort nur die Geräteperiode.
+            // Headroom for bursty RDP audio; callbacks still use the device period.
+            // Do not clamp to the reported buffer range: Remote Audio reports only
+            // the device period, not the shared-mode buffer capacity.
             let frames = config.sample_rate / 2;
             log::debug!("requesting {frames}-frame (500 ms) capture buffer from WASAPI");
             config.buffer_size = cpal::BufferSize::Fixed(frames);
