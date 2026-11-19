@@ -9,6 +9,8 @@ use std::{
 mod error;
 #[cfg(target_os = "linux")]
 mod pulse;
+#[cfg(target_os = "windows")]
+mod wasapi;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use error::{map_error, map_error_during};
@@ -397,10 +399,7 @@ impl OpenDevice for CpalOpenDevice {
         data: DataCallback,
         error: ErrorCallback,
     ) -> Result<Box<dyn InputStream>, BackendError> {
-        #[cfg_attr(
-            not(any(target_os = "linux", target_os = "windows")),
-            allow(unused_mut)
-        )]
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
         let mut config = self.config.config();
         #[cfg(target_os = "linux")]
         let watch = match &self.device_id {
@@ -413,32 +412,12 @@ impl OpenDevice for CpalOpenDevice {
             log::debug!("requesting {frames}-frame fragments from PulseAudio");
             config.buffer_size = cpal::BufferSize::Fixed(frames);
         }
-        #[cfg(target_os = "windows")]
-        {
-            // Headroom for bursty RDP audio; callbacks still use the device period.
-            // Do not clamp to the reported buffer range: Remote Audio reports only
-            // the device period, not the shared-mode buffer capacity.
-            let frames = config.sample_rate / 2;
-            log::debug!("requesting {frames}-frame (500 ms) capture buffer from WASAPI");
-            config.buffer_size = cpal::BufferSize::Fixed(frames);
-        }
         let build_started = Instant::now();
-        let device = &self.device;
-        let stream = match self.format.sample_format {
-            SampleFormat::U8 => build_stream::<u8>(device, config, data, error),
-            SampleFormat::I8 => build_stream::<i8>(device, config, data, error),
-            SampleFormat::U16 => build_stream::<u16>(device, config, data, error),
-            SampleFormat::I16 => build_stream::<i16>(device, config, data, error),
-            SampleFormat::U24 => build_stream::<cpal::U24>(device, config, data, error),
-            SampleFormat::I24 => build_stream::<cpal::I24>(device, config, data, error),
-            SampleFormat::U32 => build_stream::<u32>(device, config, data, error),
-            SampleFormat::I32 => build_stream::<i32>(device, config, data, error),
-            SampleFormat::U64 => build_stream::<u64>(device, config, data, error),
-            SampleFormat::I64 => build_stream::<i64>(device, config, data, error),
-            SampleFormat::F32 => build_stream::<f32>(device, config, data, error),
-            SampleFormat::F64 => build_stream::<f64>(device, config, data, error),
-        }
-        .map_err(|e| map_error_during("Failed to build input stream", e))?;
+        #[cfg(not(target_os = "windows"))]
+        let stream = build_any(&self.device, self.format, config, data, error);
+        #[cfg(target_os = "windows")]
+        let stream = wasapi::build_with_headroom(&self.device, self.format, config, data, error);
+        let stream = stream.map_err(|e| map_error_during("Failed to build input stream", e))?;
         let build_elapsed = build_started.elapsed();
 
         let play_started = Instant::now();
@@ -457,6 +436,30 @@ impl OpenDevice for CpalOpenDevice {
             #[cfg(target_os = "linux")]
             watch,
         }))
+    }
+}
+
+/// Builds an input stream in the device's sample format.
+fn build_any(
+    device: &cpal::Device,
+    format: DeviceFormat,
+    config: cpal::StreamConfig,
+    data: DataCallback,
+    error: ErrorCallback,
+) -> Result<cpal::Stream, cpal::Error> {
+    match format.sample_format {
+        SampleFormat::U8 => build_stream::<u8>(device, config, data, error),
+        SampleFormat::I8 => build_stream::<i8>(device, config, data, error),
+        SampleFormat::U16 => build_stream::<u16>(device, config, data, error),
+        SampleFormat::I16 => build_stream::<i16>(device, config, data, error),
+        SampleFormat::U24 => build_stream::<cpal::U24>(device, config, data, error),
+        SampleFormat::I24 => build_stream::<cpal::I24>(device, config, data, error),
+        SampleFormat::U32 => build_stream::<u32>(device, config, data, error),
+        SampleFormat::I32 => build_stream::<i32>(device, config, data, error),
+        SampleFormat::U64 => build_stream::<u64>(device, config, data, error),
+        SampleFormat::I64 => build_stream::<i64>(device, config, data, error),
+        SampleFormat::F32 => build_stream::<f32>(device, config, data, error),
+        SampleFormat::F64 => build_stream::<f64>(device, config, data, error),
     }
 }
 
